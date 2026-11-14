@@ -3,6 +3,7 @@ import pygame
 
 from core.strategy import StrategyPlanner
 from core.navigator import Navigator
+from core.narrative import NarrativeEngine
 
 pygame.init()
 
@@ -68,6 +69,7 @@ def create_obstacles():
 def build_world():
     global obstacles, planner, hazards, path, navigator
     global ship, ithaca, simulation_time, paused, route_exposure, route_duration
+    global narrative
 
     obstacles = create_obstacles()
     planner = StrategyPlanner(GRID_WIDTH, GRID_HEIGHT, obstacles)
@@ -103,6 +105,7 @@ def build_world():
     ithaca = grid_to_world(*GOAL)
     simulation_time = 0.0
     paused = True
+    narrative = NarrativeEngine()
 
     if path:
         waits = sum(a[:2] == b[:2] for a, b in zip(path, path[1:]))
@@ -243,6 +246,19 @@ def draw_anomaly(t):
     draw_text(label, font_small, color, (x - 95, y - 75))
 
 
+def draw_narrative():
+    if narrative.current is None:
+        return
+    message = narrative.current.text
+    rendered = font_normal.render(message, True, GOLD)
+    center_x = WIDTH // 2
+    box_width = rendered.get_width() + 48
+    box = pygame.Rect(center_x - box_width // 2, 186, box_width, 48)
+    pygame.draw.rect(screen, PANEL, box, border_radius=6)
+    pygame.draw.rect(screen, GOLD, box, 1, border_radius=6)
+    screen.blit(rendered, rendered.get_rect(center=box.center))
+
+
 def draw_interface():
     pygame.draw.rect(screen, PANEL, (0, 0, WIDTH, 92))
     pygame.draw.line(screen, GOLD, (0, 92), (WIDTH, 92), 1)
@@ -312,6 +328,7 @@ while running:
                 simulation_time = 0.0
                 paused = True
                 navigator.reset()
+                narrative.reset()
                 ship.update(grid_to_world(*START))
 
     if not paused and path:
@@ -322,12 +339,20 @@ while running:
             paused = True
             ship.update(grid_to_world(*GOAL))
 
+    # Story reacts to the actual ship position and navigation state.
+    if path:
+        storm_center = grid_to_world(*hazards[0]["position"])
+        storm_distance = ship.distance_to(storm_center) / CELL_SIZE
+        narrative.update(navigation_status(), storm_distance,
+                         storm_active(simulation_time))
+
     draw_ocean(simulation_time)
     draw_islands()
     draw_navigation_path()
     draw_ithaca()
     draw_anomaly(simulation_time)
     draw_ship(simulation_time)
+    draw_narrative()
     draw_interface()
     pygame.display.flip()
 
