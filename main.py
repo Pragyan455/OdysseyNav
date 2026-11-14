@@ -1,7 +1,7 @@
 import math
 import pygame
 
-from core.chronos import ChronosPlanner
+from core.strategy import StrategyPlanner
 from core.navigator import Navigator
 
 pygame.init()
@@ -31,6 +31,7 @@ font_small = pygame.font.SysFont("consolas", 14)
 START = (5, 15)
 GOAL = (41, 15)
 DEMO_MODE = False
+STRATEGY = "balanced"
 PASSAGE_Y = START[1]
 PASSAGE_START = 10
 PASSAGE_END = 37
@@ -66,10 +67,10 @@ def create_obstacles():
 
 def build_world():
     global obstacles, planner, hazards, path, navigator
-    global ship, ithaca, simulation_time, paused
+    global ship, ithaca, simulation_time, paused, route_exposure, route_duration
 
     obstacles = create_obstacles()
-    planner = ChronosPlanner(GRID_WIDTH, GRID_HEIGHT, obstacles)
+    planner = StrategyPlanner(GRID_WIDTH, GRID_HEIGHT, obstacles)
 
     if DEMO_MODE:
         # Single-cell storm in a constrained channel: demonstrates waiting.
@@ -88,8 +89,15 @@ def build_world():
             "active_duration": 6,
         }]
 
-    path = planner.plan(START, GOAL, hazards=hazards,
-                        start_time=0, max_time=150)
+    path = planner.plan_strategy(
+        START, GOAL, hazards=hazards, strategy=STRATEGY,
+        start_time=0, max_time=150,
+    )
+    route_duration = path[-1][2] - path[0][2] if path else None
+    route_exposure = (
+        sum(planner.risk_at(x, y, t, hazards) for x, y, t in path[1:])
+        if path else None
+    )
     navigator = Navigator(path)
     ship = grid_to_world(*START)
     ithaca = grid_to_world(*GOAL)
@@ -98,8 +106,10 @@ def build_world():
 
     if path:
         waits = sum(a[:2] == b[:2] for a, b in zip(path, path[1:]))
-        print(f"{'DEMO' if DEMO_MODE else 'CINEMATIC'}: "
-              f"{len(path)} states, {waits} waiting steps")
+        print(f"{'DEMO' if DEMO_MODE else 'CINEMATIC'} "
+              f"| {STRATEGY.upper()} | {len(path)} states | "
+              f"{waits} waiting steps | arrival {route_duration}s | "
+              f"exposure {route_exposure:.3f}")
     else:
         print("Chronos: no safe route found")
 
@@ -249,26 +259,30 @@ def draw_interface():
     draw_text(f"ROUTE STEPS REMAINING: {remaining}",
               font_small, MUTED, (570, 54))
 
+    if path:
+        draw_text(f"ETA: {route_duration}s   STORM EXPOSURE: {route_exposure:.2f}",
+                  font_small, MUTED, (35, 115))
+
     if status == "WAITING":
         draw_text("POSEIDON BLOCKS THE PASSAGE — HOLD POSITION",
-                  font_small, DANGER, (325, 110))
+                  font_small, DANGER, (325, 135))
     elif status == "ARRIVED":
         draw_text("MISSION COMPLETE — ITHACA REACHED",
-                  font_normal, GOLD, (375, 110))
+                  font_normal, GOLD, (375, 135))
     elif status == "NO ROUTE":
         draw_text("NO SAFE ROUTE — CHECK THE NAVIGATION MAP",
-                  font_small, DANGER, (340, 110))
+                  font_small, DANGER, (340, 135))
 
     pygame.draw.rect(screen, PANEL, (0, HEIGHT - 70, WIDTH, 70))
     pygame.draw.line(screen, GOLD, (0, HEIGHT - 70), (WIDTH, HEIGHT - 70), 1)
-    draw_text("SPACE: START / PAUSE", font_small, WHITE, (35, HEIGHT - 42))
-    draw_text("R: RESET", font_small, WHITE, (260, HEIGHT - 42))
-    draw_text("1: SEA  2: DEMO", font_small, WHITE, (360, HEIGHT - 42))
+    draw_text("SPACE: PLAY  R: RESET", font_small, WHITE, (25, HEIGHT - 42))
+    draw_text("1: SEA  2: DEMO", font_small, WHITE, (245, HEIGHT - 42))
+    draw_text("3: SAFE  4: BAL  5: FAST", font_small, GOLD, (405, HEIGHT - 42))
     label, countdown = storm_countdown(simulation_time)
     draw_text(f"{label}: {countdown:.1f}s", font_small,
               DANGER if storm_active(simulation_time) else SAFE,
               (590, HEIGHT - 42))
-    draw_text("ITHACA", font_small, GOLD, (1060, HEIGHT - 42))
+    draw_text("ITHACA", font_small, GOLD, (1100, HEIGHT - 42))
 
 running = True
 
@@ -284,6 +298,15 @@ while running:
                 selected_demo = event.key == pygame.K_2
                 if DEMO_MODE != selected_demo:
                     DEMO_MODE = selected_demo
+                    build_world()
+            elif event.key in (pygame.K_3, pygame.K_4, pygame.K_5):
+                selected = {
+                    pygame.K_3: "survival",
+                    pygame.K_4: "balanced",
+                    pygame.K_5: "speed",
+                }[event.key]
+                if STRATEGY != selected:
+                    STRATEGY = selected
                     build_world()
             elif event.key == pygame.K_r:
                 simulation_time = 0.0
