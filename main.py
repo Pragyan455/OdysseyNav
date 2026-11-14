@@ -4,6 +4,7 @@ import pygame
 from core.strategy import StrategyPlanner
 from core.navigator import Navigator
 from core.narrative import NarrativeEngine
+from core.timeline import VoyageTimeline
 
 pygame.init()
 
@@ -69,7 +70,7 @@ def create_obstacles():
 def build_world():
     global obstacles, planner, hazards, path, navigator
     global ship, ithaca, simulation_time, paused, route_exposure, route_duration
-    global narrative
+    global narrative, timeline, replay_mode, replay_time
 
     obstacles = create_obstacles()
     planner = StrategyPlanner(GRID_WIDTH, GRID_HEIGHT, obstacles)
@@ -106,6 +107,9 @@ def build_world():
     simulation_time = 0.0
     paused = True
     narrative = NarrativeEngine()
+    timeline = VoyageTimeline(path, hazards)
+    replay_mode = False
+    replay_time = 0.0
 
     if path:
         waits = sum(a[:2] == b[:2] for a, b in zip(path, path[1:]))
@@ -259,6 +263,31 @@ def draw_narrative():
     screen.blit(rendered, rendered.get_rect(center=box.center))
 
 
+def draw_timeline():
+    if not path:
+        return
+    x0, x1, y = 220, WIDTH - 220, HEIGHT - 114
+    pygame.draw.rect(screen, PANEL, (x0 - 20, y - 36, x1 - x0 + 40, 72), border_radius=6)
+    pygame.draw.line(screen, MUTED, (x0, y), (x1, y), 3)
+    duration = max(0.001, timeline.end - timeline.start)
+    for step in range(int(timeline.start), int(timeline.end) + 1):
+        frame = timeline.frame(step + 0.001)
+        if frame.storm_active:
+            px = x0 + (step - timeline.start) / duration * (x1 - x0)
+            pygame.draw.line(screen, DANGER, (px, y - 5), (px, y + 5), 2)
+    for wait_time in timeline.wait_times:
+        px = x0 + (wait_time - timeline.start) / duration * (x1 - x0)
+        pygame.draw.circle(screen, GOLD, (round(px), y), 5)
+    shown_time = replay_time if replay_mode else simulation_time
+    shown_time = timeline.clamp(shown_time)
+    px = x0 + (shown_time - timeline.start) / duration * (x1 - x0)
+    pygame.draw.circle(screen, WHITE, (round(px), y), 8)
+    label = "REPLAY" if replay_mode else "VOYAGE TIMELINE"
+    draw_text(f"{label}  {shown_time:.1f}s / {timeline.end:.0f}s", font_small,
+              GOLD, (x0, y - 30))
+    draw_text("RED: STORM   GOLD: WAIT", font_small, MUTED, (x1 - 210, y - 30))
+
+
 def draw_interface():
     pygame.draw.rect(screen, PANEL, (0, 0, WIDTH, 92))
     pygame.draw.line(screen, GOLD, (0, 92), (WIDTH, 92), 1)
@@ -267,9 +296,9 @@ def draw_interface():
     draw_text("MODE: " + ("CHRONOS DEMO" if DEMO_MODE else "CINEMATIC"),
               font_small, MUTED, (365, 28))
 
-    status = navigation_status()
+    status = "REPLAY" if replay_mode else navigation_status()
     draw_text(f"CHRONOS ENGINE: {status}", font_small, GOLD, (840, 28))
-    draw_text(f"SIMULATION TIME: {simulation_time:06.1f}",
+    draw_text(f"SIMULATION TIME: {(replay_time if replay_mode else simulation_time):06.1f}",
               font_small, WHITE, (840, 54))
     remaining = max(0, len(path) - navigator.index - 1) if path else 0
     draw_text(f"ROUTE STEPS REMAINING: {remaining}",
@@ -294,11 +323,11 @@ def draw_interface():
     draw_text("SPACE: PLAY  R: RESET", font_small, WHITE, (25, HEIGHT - 42))
     draw_text("1: SEA  2: DEMO", font_small, WHITE, (245, HEIGHT - 42))
     draw_text("3: SAFE  4: BAL  5: FAST", font_small, GOLD, (405, HEIGHT - 42))
-    label, countdown = storm_countdown(simulation_time)
+    label, countdown = storm_countdown(replay_time if replay_mode else simulation_time)
     draw_text(f"{label}: {countdown:.1f}s", font_small,
-              DANGER if storm_active(simulation_time) else SAFE,
+              DANGER if storm_active(replay_time if replay_mode else simulation_time) else SAFE,
               (590, HEIGHT - 42))
-    draw_text("ITHACA", font_small, GOLD, (1100, HEIGHT - 42))
+    draw_text("T: REPLAY", font_small, GOLD, (1050, HEIGHT - 42))
 
 running = True
 
@@ -308,7 +337,24 @@ while running:
         if event.type == pygame.QUIT:
             running = False
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_SPACE and path and not navigator.finished:
+            if event.key == pygame.K_t and path:
+                if not replay_mode:
+                    replay_mode = True
+                    replay_time = timeline.clamp(simulation_time)
+                    paused = True
+                else:
+                    replay_mode = False
+                    ship.update(get_ship_position(simulation_time))
+            elif replay_mode and event.key in (pygame.K_LEFT, pygame.K_RIGHT,
+                                                pygame.K_HOME, pygame.K_END):
+                if event.key == pygame.K_HOME:
+                    replay_time = timeline.start
+                elif event.key == pygame.K_END:
+                    replay_time = timeline.end
+                else:
+                    replay_time = timeline.clamp(replay_time + (
+                        -1 if event.key == pygame.K_LEFT else 1))
+            elif event.key == pygame.K_SPACE and not replay_mode and path and not navigator.finished:
                 paused = not paused
             elif event.key in (pygame.K_1, pygame.K_2):
                 selected_demo = event.key == pygame.K_2
@@ -331,7 +377,7 @@ while running:
                 narrative.reset()
                 ship.update(grid_to_world(*START))
 
-    if not paused and path:
+    if not paused and not replay_mode and path:
         simulation_time += dt
         navigator.update(simulation_time)
         ship.update(get_ship_position(simulation_time))
@@ -340,19 +386,26 @@ while running:
             ship.update(grid_to_world(*GOAL))
 
     # Story reacts to the actual ship position and navigation state.
-    if path:
+    if path and not replay_mode:
         storm_center = grid_to_world(*hazards[0]["position"])
         storm_distance = ship.distance_to(storm_center) / CELL_SIZE
         narrative.update(navigation_status(), storm_distance,
                          storm_active(simulation_time))
 
-    draw_ocean(simulation_time)
+    displayed_time = replay_time if replay_mode else simulation_time
+    if replay_mode:
+        frame = timeline.frame(replay_time)
+        if frame:
+            ship.update(grid_to_world(*frame.position))
+    draw_ocean(displayed_time)
     draw_islands()
     draw_navigation_path()
     draw_ithaca()
-    draw_anomaly(simulation_time)
-    draw_ship(simulation_time)
-    draw_narrative()
+    draw_anomaly(displayed_time)
+    draw_ship(displayed_time)
+    if not replay_mode:
+        draw_narrative()
+    draw_timeline()
     draw_interface()
     pygame.display.flip()
 
