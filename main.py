@@ -5,6 +5,7 @@ from core.strategy import StrategyPlanner
 from core.navigator import Navigator
 from core.narrative import NarrativeEngine
 from core.timeline import VoyageTimeline
+from core.comparison import compare_strategies
 
 pygame.init()
 
@@ -22,6 +23,11 @@ ISLAND = (63, 83, 91)
 DANGER = (175, 65, 70)
 SAFE = (55, 125, 115)
 PANEL = (5, 15, 27)
+STRATEGY_COLORS = {
+    "survival": (90, 195, 163),
+    "balanced": (109, 165, 220),
+    "speed": (236, 173, 92),
+}
 
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("ODYSSEY | The Fractured Sea")
@@ -71,6 +77,7 @@ def build_world():
     global obstacles, planner, hazards, path, navigator
     global ship, ithaca, simulation_time, paused, route_exposure, route_duration
     global narrative, timeline, replay_mode, replay_time
+    global comparison_results, comparison_mode
 
     obstacles = create_obstacles()
     planner = StrategyPlanner(GRID_WIDTH, GRID_HEIGHT, obstacles)
@@ -92,10 +99,10 @@ def build_world():
             "active_duration": 6,
         }]
 
-    path = planner.plan_strategy(
-        START, GOAL, hazards=hazards, strategy=STRATEGY,
-        start_time=0, max_time=150,
+    comparison_results = compare_strategies(
+        planner, START, GOAL, hazards=hazards, start_time=0, max_time=150
     )
+    path = list(comparison_results[STRATEGY].path) or None
     route_duration = path[-1][2] - path[0][2] if path else None
     route_exposure = (
         sum(planner.risk_at(x, y, t, hazards) for x, y, t in path[1:])
@@ -110,6 +117,7 @@ def build_world():
     timeline = VoyageTimeline(path, hazards)
     replay_mode = False
     replay_time = 0.0
+    comparison_mode = False
 
     if path:
         waits = sum(a[:2] == b[:2] for a, b in zip(path, path[1:]))
@@ -208,6 +216,45 @@ def draw_navigation_path():
         pygame.draw.lines(screen, GOLD, False, points, 2)
     for point in points[::4]:
         pygame.draw.circle(screen, WHITE, (round(point.x), round(point.y)), 3)
+
+
+def draw_comparison_routes():
+    """Overlay the three routes; current selection remains highlighted."""
+    for strategy in ("survival", "balanced", "speed"):
+        result = comparison_results[strategy]
+        if not result.reachable:
+            continue
+        points = [grid_to_world(x, y) for x, y, _ in result.path]
+        if len(points) >= 2:
+            pygame.draw.lines(screen, STRATEGY_COLORS[strategy], False,
+                              points, 4 if strategy == STRATEGY else 2)
+
+
+def draw_comparison_panel():
+    """Display factual route metrics; differences depend on the scenario."""
+    panel = pygame.Rect(245, 390, 710, 226)
+    pygame.draw.rect(screen, PANEL, panel, border_radius=8)
+    pygame.draw.rect(screen, GOLD, panel, 1, border_radius=8)
+    draw_text("THE COUNCIL OF FATES  |  C: CLOSE", font_normal, GOLD,
+              (panel.x + 22, panel.y + 14))
+    draw_text("STRATEGY           ARRIVAL     MOVES     WAITS     EXPOSURE",
+              font_small, MUTED, (panel.x + 22, panel.y + 60))
+    for index, strategy in enumerate(("survival", "balanced", "speed")):
+        result = comparison_results[strategy]
+        y = panel.y + 91 + index * 37
+        selected = "*" if strategy == STRATEGY else " "
+        if result.reachable:
+            values = (f"{result.travel_time:>5.0f}s"
+                      f"        {result.movement_steps:>3}"
+                      f"        {result.waiting_steps:>3}"
+                      f"        {result.storm_exposure:>7.2f}")
+        else:
+            values = "NO SAFE ROUTE"
+        draw_text(f"{selected} {strategy.upper():<10}", font_small,
+                  STRATEGY_COLORS[strategy], (panel.x + 22, y))
+        draw_text(values, font_small, WHITE, (panel.x + 196, y))
+    draw_text("Exposure is a relative risk score, not a probability.",
+              font_small, MUTED, (panel.x + 22, panel.bottom - 25))
 
 
 def draw_ship(t):
@@ -327,7 +374,7 @@ def draw_interface():
     draw_text(f"{label}: {countdown:.1f}s", font_small,
               DANGER if storm_active(replay_time if replay_mode else simulation_time) else SAFE,
               (590, HEIGHT - 42))
-    draw_text("T: REPLAY", font_small, GOLD, (1050, HEIGHT - 42))
+    draw_text("T: REPLAY  C: COMPARE", font_small, GOLD, (985, HEIGHT - 42))
 
 running = True
 
@@ -337,7 +384,9 @@ while running:
         if event.type == pygame.QUIT:
             running = False
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_t and path:
+            if event.key == pygame.K_c:
+                comparison_mode = not comparison_mode
+            elif event.key == pygame.K_t and path:
                 if not replay_mode:
                     replay_mode = True
                     replay_time = timeline.clamp(simulation_time)
@@ -399,7 +448,10 @@ while running:
             ship.update(grid_to_world(*frame.position))
     draw_ocean(displayed_time)
     draw_islands()
-    draw_navigation_path()
+    if comparison_mode:
+        draw_comparison_routes()
+    else:
+        draw_navigation_path()
     draw_ithaca()
     draw_anomaly(displayed_time)
     draw_ship(displayed_time)
@@ -407,6 +459,8 @@ while running:
         draw_narrative()
     draw_timeline()
     draw_interface()
+    if comparison_mode:
+        draw_comparison_panel()
     pygame.display.flip()
 
 pygame.quit()
