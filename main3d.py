@@ -495,8 +495,10 @@ class Odyssey(ShowBase):
                 self.turn_from + turn * f)
 
     def update_sound(self, dt):
-        if self.state == "title" or self.ending == "won":
-            music = "title"                      # the ancient Seikilos song
+        if self.ending == "won" and self.anim_time < self.celebration_ends:
+            music = None                         # the homecoming plays alone
+        elif self.state == "title" or self.ending == "won":
+            music = "title"
         elif self.ending == "over":
             music = None
         elif self.cyclone:
@@ -684,7 +686,7 @@ class Odyssey(ShowBase):
         true_course = sum(1 for _, _, ok in j.history if ok)
         self.state, self.card_phase = "card", "end"
         self.ending = "won"
-        self.sound.play("chime", 0.8)
+        self.celebration_ends = self.anim_time + self.sound.celebrate()
         self.card_title.setText("YOU HAVE REACHED ITHACA")
         self.card_sub.setText(f"{I.ITHACA['book']}   ·   HOME")
         self.card_sub.setFg(L.GOLD)

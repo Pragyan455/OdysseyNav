@@ -18,7 +18,7 @@ MUSIC = {"title": "music_title.wav", "sea": "music_sea.wav",
 MUSIC_VOLUME = 0.55
 EFFECTS = {"roar": "roar.wav", "splash": "splash.wav",
            "thunder": "thunder.wav", "chime": "chime.wav",
-           "chime_low": "chime_low.wav"}
+           "chime_low": "chime_low.wav", "ithaca": "ithaca.wav"}
 FADE_PER_SECOND = 0.6
 
 
@@ -65,6 +65,13 @@ class Sound:
 
     def thunder(self):
         self.play("thunder", 0.9)
+
+    def celebrate(self):
+        """The homecoming. Returns how long it lasts (seconds)."""
+        if self.muted:
+            return 0.0
+        self.play("ithaca", 1.0)
+        return self.effects["ithaca"].length()
 
     def update(self, dt, music, wind):
         """music: 'title' / 'sea' / 'storm' / None; wind: 0..1."""

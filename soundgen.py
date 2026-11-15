@@ -9,6 +9,9 @@ and are only rebuilt when this file's VERSION changes.
   music_storm  fast low ostinato with drums (Phrygian mode)
   sea_loop     swelling waves and foam      wind_loop  howling gusts
   roar, splash, thunder, chime, chime_low    one-shot effects
+  ithaca       the homecoming: the great bow is strung and loosed, the arrow
+               rings through the twelve axe heads, Zeus thunders, and the
+               hall breaks into a 7/8 dance with drums, claps and aulos
 
 The music and the two ambience loops repeat seamlessly: they are built on
 a circle (filters and reverb wrap around the loop end).
@@ -19,7 +22,7 @@ import wave
 
 import numpy as np
 
-VERSION = "3"
+VERSION = "5"
 SR = 22050                         # samples per second
 D3 = 146.83                        # Hz, the tonic of every mode below
 
@@ -266,6 +269,154 @@ def chime(freq):
     return x * np.minimum(1, t / 0.003)
 
 
+# --- the homecoming (Odyssey, Book XXI) ------------------------------------------
+
+def put(track, sound, start, gain=1.0):
+    """Add a sound into a (non-looping) track at `start` seconds."""
+    i = int(start * SR)
+    n = min(len(sound), len(track) - i)
+    if n > 0:
+        track[i:i + n] += sound[:n] * gain
+
+
+def bowstring(rng):
+    """The great bow: a sharp snap, then the string sings and settles."""
+    t = seconds(1.6)
+    pitch = 98 + 40 * np.exp(-t * 30)               # snaps in, settles low
+    phase = 2 * np.pi * np.cumsum(pitch) / SR
+    string = sum(np.sin(phase * n) / n ** 0.8 * np.exp(-t * (2.5 + 1.8 * n))
+                 for n in range(1, 14))
+    string = np.tanh(string * 2.2)                   # a taut, buzzy twang
+    snap = shape(rng.standard_normal(len(t)), band(1800, 7000))
+    snap = snap / np.std(snap) * np.exp(-t * 90)
+    song = np.sin(2 * np.pi * 1320 * t * (1 - 0.06 * t)) * \
+        np.exp(-t * 6) * 0.12                       # "sang like a swallow"
+    return string * 0.9 + snap * 0.6 + song
+
+
+def arrow_flight(rng):
+    t = seconds(0.45)
+    hiss = shape(rng.standard_normal(len(t)), band(900, 4000))
+    hiss /= np.std(hiss)
+    rise = np.sin(np.pi * np.clip(t / 0.45, 0, 1)) ** 2
+    return hiss * rise * (0.7 + 0.3 * np.sin(2 * np.pi * 34 * t))
+
+
+def axe_ring(freq):
+    t = seconds(0.9)
+    x = sum(a * np.exp(-t * d) * np.sin(2 * np.pi * freq * r * t)
+            for r, a, d in [(1, 1, 9), (2.41, 0.6, 12), (3.87, 0.35, 16),
+                            (5.3, 0.2, 22)])
+    return x * np.minimum(1, t / 0.001)
+
+
+def aulos(freq, length, amp=1.0):
+    """The aulos, a reed pipe: a bright, buzzy, slightly wavering tone."""
+    t = seconds(length)
+    vib = 1 + 0.008 * np.sin(2 * np.pi * 5.5 * t) * np.minimum(1, t / 0.25)
+    phase = 2 * np.pi * np.cumsum(freq * vib) / SR
+    x = sum(np.sin(phase * n) * (1 / n if n % 2 else 0.6 / n)
+            for n in range(1, 10))
+    env = np.minimum(1, t / 0.03) * np.minimum(1, (length - t) / 0.06)
+    return x * np.clip(env, 0, 1) * amp
+
+
+def frame_drum(low=True, amp=1.0):
+    t = seconds(0.45 if low else 0.18)
+    if low:                                          # "doum": deep and round
+        pitch = 110 * np.exp(-t * 10) + 58
+        body = np.sin(2 * np.pi * np.cumsum(pitch) / SR) * np.exp(-t * 7)
+        return body * amp
+    tek = np.random.default_rng(int(amp * 1000)).standard_normal(len(t))
+    tek = shape(tek, band(1200, 5000)) * np.exp(-t * 45)   # "tek": the rim
+    ring = np.sin(2 * np.pi * 330 * t) * np.exp(-t * 30) * 0.5
+    return (tek / (np.std(tek) + 1e-9) * 0.5 + ring) * amp
+
+
+def clap(rng, people=6):
+    t = seconds(0.25)
+    x = np.zeros_like(t)
+    for _ in range(people):                          # many hands, not quite
+        start = rng.uniform(0, 0.025)                # together
+        burst = shape(rng.standard_normal(len(t)), band(900, 3500))
+        burst = burst / np.std(burst) * np.exp(-np.clip(t - start, 0, None)
+                                                * 38) * (t >= start)
+        x += burst
+    return x / people
+
+
+def crowd_cheer(rng, length=4.0):
+    """A hall full of voices rising: many wavering 'ahh's plus breath."""
+    t = seconds(length)
+    voices = np.zeros_like(t)
+    for _ in range(26):
+        f = rng.uniform(170, 420)
+        wobble = 1 + 0.03 * np.sin(2 * np.pi * rng.uniform(3, 7) * t +
+                                   rng.uniform(0, 6))
+        rise = 1 + 0.12 * np.minimum(1, t / rng.uniform(0.3, 1.0))
+        phase = 2 * np.pi * np.cumsum(f * wobble * rise) / SR
+        voices += sum(np.sin(phase * n) / n for n in range(1, 8))
+    voices = shape(voices, lambda fr: np.exp(-((fr - 750) / 380) ** 2) +
+                   0.7 * np.exp(-((fr - 1200) / 450) ** 2))   # an open "ah"
+    breath = shape(rng.standard_normal(len(t)), band(500, 3000))
+    x = voices / np.std(voices) + breath / np.std(breath) * 0.35
+    env = np.minimum(1, t / 0.6) * np.minimum(1, (length - t) / 1.5)
+    return x * np.clip(env, 0, 1)
+
+
+def ithaca(rng):
+    total = 16.6
+    track = np.zeros(int(total * SR))
+    # 1. The bow is strung and loosed
+    put(track, bowstring(rng), 0.0, 2.6)
+    # 2. The arrow flies through the twelve axe heads and strikes home
+    put(track, arrow_flight(rng), 0.32, 1.1)
+    for k in range(12):
+        put(track, axe_ring(2350 - k * 55), 0.45 + k * 0.035,
+            1.3 * (0.84 ** k) + 0.15)
+    put(track, drum(0.35, 1.0), 0.95, 1.6)
+    # 3. Zeus thunders his sign
+    put(track, thunder(rng), 1.35, 1.5)
+
+    # 4. The hall erupts: a 7/8 dance (3 + 2 + 2), the kalamatianos
+    start, eighth = 3.0, 0.155
+    bar = 7 * eighth
+    bars = 10
+    put(track, crowd_cheer(rng, 4.5), 2.6, 0.45)
+    for b in range(bars):
+        t0 = start + b * bar
+        put(track, frame_drum(True, 1.0), t0)                # doum
+        put(track, frame_drum(False, 0.7), t0 + 3 * eighth)  # tek
+        put(track, frame_drum(False, 0.7), t0 + 5 * eighth)  # tek
+        if b % 2 == 1:
+            put(track, frame_drum(False, 0.4), t0 + 6 * eighth)
+        for e in (3, 5):
+            put(track, clap(rng), t0 + e * eighth, 0.5)
+        for k, degree in enumerate((0, 4, 7)):                # lyre strum
+            put(track, lyre(note_hz(degree, DORIAN), 1.4, 0.5),
+                t0 + k * 0.02)
+    # the aulos: one pipe holds the drone, the other dances above it
+    put(track, aulos(D3, bars * bar, 0.18), start)
+    tune = [(0, 4, 3), (3, 5, 2), (5, 4, 2), (7, 7, 3), (10, 5, 2),
+            (12, 4, 2), (14, 3, 3), (17, 2, 2), (19, 1, 2), (21, 0, 7),
+            (28, 4, 3), (31, 7, 2), (33, 8, 2), (35, 9, 3), (38, 8, 2),
+            (40, 7, 2), (42, 5, 3), (45, 4, 2), (47, 2, 2), (49, 4, 7),
+            (56, 7, 3), (59, 9, 2), (61, 8, 2), (63, 7, 3), (66, 5, 4)]
+    for when, degree, length in tune:                         # in eighths
+        put(track, aulos(note_hz(degree, DORIAN, 1), length * eighth * 0.95,
+                         0.32), start + when * eighth)
+    # 5. A last great beat, a ringing cymbal, the lyre's chord
+    end = start + bars * bar
+    put(track, drum(0.6, 1.0), end, 2.0)
+    put(track, frame_drum(True, 1.0), end, 1.6)
+    for k, f in enumerate((3200, 4100, 5300)):
+        put(track, axe_ring(f), end + k * 0.01, 0.35)
+    for k, degree in enumerate((0, 4, 7, 9, 11)):
+        put(track, lyre(note_hz(degree, DORIAN), 3.0, 0.6), end + k * 0.05)
+    return reverb(np.concatenate([track, np.zeros(int(0.8 * SR))]),
+                  length=1.8, wet=0.25)
+
+
 # --- build everything ------------------------------------------------------------
 
 def build(folder):
@@ -286,6 +437,7 @@ def build(folder):
         "thunder.wav": thunder(rng),
         "chime.wav": chime(880.0),
         "chime_low.wav": chime(440.0 * 2 ** (3 / 12)),
+        "ithaca.wav": ithaca(rng),
     }
     for name, x in sounds.items():
         write(os.path.join(folder, name), x)
