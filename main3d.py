@@ -29,6 +29,7 @@ if os.environ.get("ODYSSEY_MUTE"):
 
 from direct.showbase.ShowBase import ShowBase  # noqa: E402
 from direct.gui.OnscreenText import OnscreenText  # noqa: E402
+from direct.gui.DirectGui import DirectButton, DGG  # noqa: E402
 
 import look3d as L  # noqa: E402
 from sound3d import Sound  # noqa: E402
@@ -47,6 +48,8 @@ ARROW_BUTTONS = {"arrow_up": KeyboardButton.up(),
                  "arrow_right": KeyboardButton.right()}
 HEADING = {(1, 0): 0.0, (0, 1): 90.0, (-1, 0): 180.0, (0, -1): -90.0}
 TITLE_CAM = (Vec3(0, -26, 3.2), Vec3(0, 60, 4.2))
+CHASE_OFFSET = Vec3(-3.0, -11.0, 5.2)      # camera: behind, above, a bit left
+CHASE_LOOK = Vec3(0.8, 14.0, 0.6)          # ...looking past the ship ahead
 LOW = {"food": 8, "health": 3, "crew": 4, "favor": 3, "hull": 30,
        "wood": -1, "rope": -1, "medicine": -1}
 HELM_COLOR = {"survival": L.rgb(110, 190, 180), "balanced": L.GOLD,
@@ -80,7 +83,7 @@ class Odyssey(ShowBase):
         L.build_light_and_fog(self.render, density=0.012)
         self.ship, self.oars = L.ship()
         self.ship.reparentTo(self.render)
-        self.ship.setScale(0.6)
+        self.ship.setScale(0.62)
         self.leg_root = self.render.attachNewNode("leg")
         self.behind_root = self.render.attachNewNode("behind")  # last isle
         self.cyclone_node, self.cyclone_spin = L.cyclone()
@@ -128,7 +131,11 @@ class Odyssey(ShowBase):
         self.behind_root.getChildren().detach()
         troy = L.island(8.0, 5.0, seed=99)          # where the voyage begins
         troy.reparentTo(self.behind_root)
-        troy.setPos(self.w(J.START[0], -6))
+        troy.setPos(self.w(J.START[0] - 6, -5))
+        horse = L.trojan_horse(0.8)                 # left behind on the beach
+        horse.reparentTo(troy)
+        horse.setPos(5.6, 3.6, 1.6)
+        horse.setH(-40)
         self.behind_cells = []                      # grid cells it covers
         self.start_leg()
 
@@ -152,7 +159,7 @@ class Odyssey(ShowBase):
         self.leg = j.leg()
         self.rng = random.Random(self.seed * 7919 + j.leg_index)
         self.omen = ("final" if self.leg.final
-                     else J.omen_level(j.resources["favor"]))
+                     else J.omen_level(j.resources["favor"], j.leg_index))
         # sailing state; time on a leg is counted in planner steps
         self.sim = 0.0
         self.cell = J.START
@@ -170,7 +177,8 @@ class Odyssey(ShowBase):
         if self.omen == "vague":
             self.cyclone = Cyclone(*J.cyclone_spawn(self.rng, J.START))
         self.rough = ([] if self.leg.final else
-                      J.rough_water(self.leg, j.resources["favor"], self.rng))
+                      J.rough_water(self.leg, j.resources["favor"], self.rng,
+                                    j.leg_index))
         self.rough_cells = 0
         self.block_island_behind()
         self.build_leg()
@@ -398,9 +406,35 @@ class Odyssey(ShowBase):
             self.draw_helm_thread()
             self.show_flash("YOU TAKE THE HELM", L.GOLD)
         else:
-            self.engage_helm(self.helm_strategy)
+            self.pray()
 
-    def engage_helm(self, strategy):
+    def pray(self):
+        """Pray to Zeus to bring you home: costs favor, Chronos takes the helm
+        until you land."""
+        if self.state != "sail" or self.helm:
+            return
+        if not self.journey.can_pray:
+            self.show_flash(f"ZEUS DOES NOT HEAR YOU   ·   FAVOR "
+                            f"{J.HELM_FAVOR} NEEDED")
+            self.sound.play("chime_low", 0.6)
+            return
+        self.journey.pray()
+        self.strike_lightning()
+        self.engage_helm(self.helm_strategy, prayed=True)
+
+    def strike_lightning(self):
+        (gx, gy), _ = self.ship_position()
+        top = self.w(gx, gy, 3.0)
+        if getattr(self, "bolt", None):
+            self.bolt.removeNode()
+        self.bolt = L.lightning(top + Vec3(-8, 30, 45), top,
+                                seed=int(self.anim_time * 1000))
+        self.bolt.reparentTo(self.render)
+        self.bolt_until = self.anim_time + 0.45
+        self.flash_screen_until = self.anim_time + 0.5
+        self.sound.thunder()
+
+    def engage_helm(self, strategy, prayed=False):
         self.helm_strategy = strategy
         if not self.started:
             self.started = True
@@ -415,7 +449,8 @@ class Odyssey(ShowBase):
         self.helm = {"strategy": strategy, "path": path}
         self.paused = False
         self.draw_helm_thread()
-        self.show_flash(f"CHRONOS TAKES THE HELM   ·   {strategy.upper()}",
+        self.show_flash(("ZEUS ANSWERS   ·   " if prayed else "") +
+                        f"CHRONOS TAKES THE HELM   ·   {strategy.upper()}",
                         L.GOLD)
 
     def helm_command(self, t):
@@ -647,10 +682,12 @@ class Odyssey(ShowBase):
         self.card_sub.setText(f"{island.episode['book']}   ·   {where}")
         self.card_sub.setFg(L.GOLD if island.correct else L.DANGER)
         self.card_body.setText(card["story"])
+        self.card_order = self.journey.choice_order(island)
+        shown = [card["choices"][i] for i in self.card_order]
         self.card_choices.setText("\n".join(
             f"{k + 1}    {c['text']}" +
             (f"  ({c['detail']})" if c.get("detail") else "")
-            for k, c in enumerate(card["choices"])))
+            for k, c in enumerate(shown)))
         self.card_result.setText("")
         self.card_effects.setText("")
         self.card_footer.setText("PRESS 1 OR 2 TO CHOOSE")
@@ -661,7 +698,7 @@ class Odyssey(ShowBase):
             return
         if k > 1:
             return
-        text, effects = self.journey.resolve(self.island, k)
+        text, effects = self.journey.resolve(self.island, self.card_order[k])
         if effects is None:                       # can't afford that choice
             self.card_effects.setText(text.upper())
             self.sound.play("chime_low", 0.6)
@@ -773,20 +810,25 @@ class Odyssey(ShowBase):
         else:
             self.cliff.hide()
 
-        # camera: title view, or low behind the ship
+        # camera: title view, or a chase view behind the ship
         if self.state == "title":
             target_pos, target_look = TITLE_CAM
         else:
-            mid = self.offset.x                # middle of this leg's sea
             p = ship_pos
-            target_pos = Vec3(mid + (p.x - mid) * 0.5, p.y - 19, 12)
-            target_look = Vec3(mid + (p.x - mid) * 0.7, p.y + 26, 0.0)
+            target_pos = p + CHASE_OFFSET
+            target_look = p + CHASE_LOOK
         k = min(1.0, dt * 2.5)
         self.cam_pos += (target_pos - self.cam_pos) * k
         self.cam_look += (target_look - self.cam_look) * k
         self.camera.setPos(self.cam_pos)
         self.camera.lookAt(self.cam_look)
         L.place_sea_tiles(self.sea_tiles, self.cam_pos.x, self.cam_pos.y)
+
+        if getattr(self, "bolt", None) and self.anim_time > self.bolt_until:
+            self.bolt.removeNode()
+            self.bolt = None
+        left = getattr(self, "flash_screen_until", 0) - self.anim_time
+        self.white_flash.setAlphaScale(max(0.0, min(0.8, left * 1.8)))
 
         self.draw_hud()
         if self.state == "lost":
@@ -864,6 +906,24 @@ class Odyssey(ShowBase):
                         for i in range(8)]
         self.hud_helm = self.text(tl, "", (0.07, -0.15), 0.032, L.MUTED,
                                   self.mono, TextNode.ALeft)
+        flash = L.mesh("white", [Vec3(-3, 0, -2), Vec3(3, 0, -2),
+                                 Vec3(-3, 0, 2), Vec3(3, 0, 2)],
+                       [Vec4(1, 0.97, 0.9, 1)] * 4, [(0, 1, 2), (1, 3, 2)])
+        flash.setTransparency(TransparencyAttrib.MAlpha)
+        flash.setTwoSided(True)
+        flash.reparentTo(self.render2d)
+        flash.setAlphaScale(0)
+        self.white_flash = flash
+        self.pray_button = DirectButton(
+            parent=self.a2dBottomRight, text="PRAY TO ZEUS",
+            text_font=self.serif, text_scale=0.05, text_fg=L.GOLD,
+            text_pos=(0, -0.015), frameSize=(-0.34, 0.34, -0.06, 0.07),
+            frameColor=(0.05, 0.07, 0.1, 0.9), relief=DGG.FLAT,
+            pos=(-0.44, 0, 0.2), command=self.pray)
+        self.pray_note = self.text(self.a2dBottomRight, "", (-0.44, 0.115),
+                                   0.028, L.MUTED, self.mono)
+        self.hud_shield = self.text(tl, "", (0.07, -0.205), 0.034, L.GOLD,
+                                    self.mono, TextNode.ALeft)
         self.hud_beat = self.text(root, "", (0, -0.72), 0.046, L.CREAM,
                                   self.italic, shadow=True)
         self.hud_omen = self.text(root, "", (0, 0.8), 0.045, L.CREAM,
@@ -873,10 +933,11 @@ class Odyssey(ShowBase):
         self.hud_flash = self.text(root, "", (0, 0.45), 0.055, L.DANGER,
                                    self.serif, shadow=True)
         self.hud_controls = self.text(
-            bl, "ARROWS SAIL   H CHRONOS HELM   E REPAIR   M HEAL   "
+            bl, "ARROWS SAIL   H PRAY / HELM   E REPAIR   M HEAL   "
                 "SPACE PAUSE   R RESTART   N NEW VOYAGE", (0.07, 0.06), 0.03,
             L.MUTED, self.mono, TextNode.ALeft)
         self.hud_parts = ([root, self.hud_leg, self.hud_controls,
+                           self.hud_shield, self.pray_button, self.pray_note,
                            self.hud_helm] + self.hud_res)
 
     def draw_hud(self):
@@ -904,6 +965,22 @@ class Odyssey(ShowBase):
                 "1 SURVIVAL  2 BALANCED  3 SPEED")
         else:
             self.hud_helm.setText("HELM  YOU")
+        self.hud_shield.setText("PROTECTED BY ZEUS" if j.protected else "")
+        sailing = self.state == "sail"
+        if sailing and not self.helm:
+            self.pray_button.show()
+            ready = j.can_pray
+            self.pray_button["state"] = DGG.NORMAL if ready else DGG.DISABLED
+            self.pray_button["text_fg"] = L.GOLD if ready else L.MUTED
+            self.pray_button["frameColor"] = ((0.16, 0.12, 0.05, 0.95)
+                                              if ready else
+                                              (0.05, 0.07, 0.1, 0.7))
+            self.pray_note.setText(
+                f"H · COSTS {J.PRAYER_COST} FAVOR" if ready else
+                f"FAVOR {J.HELM_FAVOR} NEEDED")
+        else:
+            self.pray_button.hide()
+            self.pray_note.setText("")
         self.hud_beat.setText(self.beat if self.anim_time < self.beat_until
                               and self.state in ("sail", "lost") else "")
 

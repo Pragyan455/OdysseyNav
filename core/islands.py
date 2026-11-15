@@ -2,7 +2,8 @@
 
 Edit freely. Each episode is one island, in the order of the Odyssey.
 On each leg the CORRECT island is the next episode (calm version); the
-WRONG island is another episode in its HARSH version.
+WRONG island is another episode in its HARSH version. The game shuffles the
+order choices are shown in. Some islands have no safe choice: both are gambles.
 
 Effects change the four resources: food, health, crew, favor.
 A choice is either sure:      {"text": ..., "effects": {...}, "result": ...}
@@ -73,9 +74,12 @@ EPISODES = [
                      "shut behind you.",
             "choices": [
                 {"text": "Blind him with the burning stake",
-                 "effects": {"crew": -2, "food": 6, "favor": -3},
-                 "result": "You escape under the sheep. Poseidon swears "
-                           "revenge."},
+                 "chance": 0.6,
+                 "win": {"crew": -1, "food": 6, "favor": -3}, "win_result":
+                     "You escape under the sheep. Poseidon swears revenge.",
+                 "lose": {"crew": -3, "health": -2, "favor": -3},
+                 "lose_result": "He gropes the doorway and seizes three men "
+                                "before you slip out."},
                 {"text": "Ply him with wine and wait",
                  "chance": 0.5,
                  "win": {"crew": -1}, "win_result":
@@ -110,8 +114,11 @@ EPISODES = [
                      "of the gods!\"",
             "choices": [
                 {"text": "Beg for one gentle breeze",
-                 "effects": {"favor": -1, "food": -3},
-                 "result": "He gives nothing. You row in dead calm."},
+                 "chance": 0.35,
+                 "win": {"favor": 1, "food": 2}, "win_result":
+                     "Moved despite himself, he lets a soft west wind go.",
+                 "lose": {"favor": -2, "food": -3}, "lose_result":
+                     "He gives nothing. You row in dead calm."},
                 {"text": "Leave at once",
                  "effects": {"food": -2},
                  "result": "You row away into still water."},
@@ -128,8 +135,10 @@ EPISODES = [
                      "from a town of giants.",
             "choices": [
                 {"text": "Moor outside the harbor and forage",
-                 "effects": {"food": 4},
-                 "result": "Cautious, and fed."},
+                 "chance": 0.65,
+                 "win": {"food": 5}, "win_result": "Cautious, and fed.",
+                 "lose": {"food": 1, "crew": -1}, "lose_result":
+                     "A giant spots one forager and carries him off."},
                 {"text": "Sail into the harbor to trade",
                  "chance": 0.4,
                  "win": {"food": 10}, "win_result":
@@ -198,8 +207,12 @@ EPISODES = [
                      "Circe warned you.",
             "choices": [
                 {"text": "Wax in the crew's ears, tie yourself to the mast",
-                 "effects": {"favor": 2, "health": -1},
-                 "result": "You strain at the ropes, but the ship passes."},
+                 "chance": 0.7,
+                 "win": {"favor": 2, "health": -1}, "win_result":
+                     "You strain at the ropes, but the ship passes.",
+                 "lose": {"favor": 1, "crew": -1, "health": -2},
+                 "lose_result": "A knot slips. A sailor dives before the "
+                                "others drag you back."},
                 {"text": "Row hard and hope",
                  "chance": 0.5,
                  "win": {}, "win_result": "The wind drowns out the song.",
@@ -230,9 +243,11 @@ EPISODES = [
                      "the whirlpool Charybdis.",
             "choices": [
                 {"text": "Hug Scylla's cliff",
-                 "effects": {"crew": -2},
-                 "result": "Six heads strike. You lose two men, not the "
-                           "ship."},
+                 "chance": 0.5,
+                 "win": {"crew": -1}, "win_result":
+                     "You row so fast she takes only one man.",
+                 "lose": {"crew": -3}, "lose_result":
+                     "Six heads strike. Three men are gone."},
                 {"text": "Risk the whirlpool",
                  "chance": 0.5,
                  "win": {}, "win_result":

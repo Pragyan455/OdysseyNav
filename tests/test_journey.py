@@ -196,3 +196,76 @@ def test_chronos_helm_reaches_the_true_island_safely():
             assert path[0][:2] == journey.START and path[0][2] >= 3
             for x, y, t in path:
                 assert not checker.is_blocked(x, y, t, leg.hazards)
+
+
+# --- favor rework, prayer, protection, randomness ------------------------------
+
+def test_favor_starts_at_zero_and_zero_favor_does_not_end_the_voyage():
+    j = journey.Journey(1)
+    assert j.resources["favor"] == 0
+    assert j.game_over() is None
+    j.apply({"favor": -5})
+    assert j.resources["favor"] == 0 and j.game_over() is None
+
+
+def test_early_legs_are_spared_the_cyclone():
+    assert journey.omen_level(0, leg_index=0) == "subtle"
+    assert journey.omen_level(0, leg_index=1) == "subtle"
+    assert journey.omen_level(0, leg_index=2) == "vague"
+    assert journey.omen_level(journey.CLEAR_OMEN_FAVOR, 0) == "clear"
+
+
+def test_praying_needs_favor_and_costs_it():
+    j = journey.Journey(1)
+    j.resources["favor"] = journey.HELM_FAVOR - 1
+    assert not j.can_pray and not j.pray()
+    assert j.resources["favor"] == journey.HELM_FAVOR - 1
+    j.resources["favor"] = journey.HELM_FAVOR
+    assert j.pray()
+    assert j.resources["favor"] == journey.HELM_FAVOR - journey.PRAYER_COST
+
+
+def test_high_favor_protects_the_voyage():
+    j = journey.Journey(1)
+    j.resources["favor"] = journey.PROTECT_FAVOR
+    j.apply({"food": -999, "health": -999, "crew": -999, "hull": -999})
+    for key in journey.PROTECTED:
+        assert j.resources[key] == 1
+    assert j.game_over() is None
+    j.eat(1000)
+    assert j.resources["food"] == 1
+    j.resources["favor"] = journey.PROTECT_FAVOR - 1      # protection ends
+    j.apply({"crew": -1})
+    assert j.game_over() == "crew"
+
+
+def test_island_positions_vary():
+    spots = {tuple(round(c) for c in i.center)
+             for seed in range(6) for index in range(4)
+             for i in journey.generate_leg(index, seed).islands}
+    xs, ys = {x for x, _ in spots}, {y for _, y in spots}
+    assert len(spots) > 30 and max(xs) - min(xs) >= 10 and max(ys) - min(ys) >= 10
+
+
+def test_kraken_positions_vary_and_spread():
+    spots = [h["position"] for seed in range(6) for index in range(4)
+             for h in journey.generate_leg(index, seed).hazards]
+    xs, ys = [x for x, _ in spots], [y for _, y in spots]
+    assert len(set(spots)) > 25
+    assert max(xs) - min(xs) >= 15 and max(ys) - min(ys) >= 20
+
+
+def test_choice_order_is_shuffled_but_stable():
+    orders = set()
+    for seed in range(12):
+        j = journey.Journey(seed)
+        isle = j.leg().islands[0]
+        orders.add(tuple(j.choice_order(isle)))
+        assert j.choice_order(isle) == j.choice_order(isle)
+    assert orders == {(0, 1), (1, 0)}
+
+
+def test_some_islands_have_no_safe_choice():
+    both_risky = [ep for ep in islands.EPISODES for v in ("calm", "harsh")
+                  if all("chance" in c for c in ep[v]["choices"])]
+    assert len(both_risky) >= 3

@@ -28,10 +28,10 @@ MAX_PLAN_STEPS = 200
 
 # --- resources -----------------------------------------------------------------
 _SHIP = ShipSurvival()             # hull numbers from the 2D game's rules
-START_RESOURCES = {"food": 30.0, "health": 10, "crew": 12, "favor": 6,
+START_RESOURCES = {"food": 30.0, "health": 10, "crew": 12, "favor": 0,
                    "hull": _SHIP.max_hull, "wood": 1, "rope": 0,
                    "medicine": 0}
-MAX_RESOURCES = {"food": 40.0, "health": 10, "crew": 12, "favor": 10,
+MAX_RESOURCES = {"food": 40.0, "health": 10, "crew": 12, "favor": 20,
                  "hull": _SHIP.max_hull, "wood": 9, "rope": 9, "medicine": 5}
 FOOD_PER_SECOND = 0.3             # eaten every second at sea
 KRAKEN_DAMAGE = {"hull": -_SHIP.damage_per_hit, "crew": -1}
@@ -42,8 +42,13 @@ HEAL_COST, HEAL_HEALTH = {"medicine": -1}, 3
 RATION_FOOD = 2.0                 # one 2D-game ration = 2 days of food here
 LOOT = {"wood": (1, 3), "rope": (0, 2), "medicine": (0, 1)}  # per landing
 INVULNERABLE_STEPS = 4            # after a kraken hit
-CLEAR_OMEN_FAVOR = 7              # favor >= this: Athena shows the way
-CYCLONE_FAVOR = 3                 # favor <= this: vague omen, cyclone hunts
+CLEAR_OMEN_FAVOR = 8              # favor >= this: Athena shows the way
+CYCLONE_FAVOR = 3                 # favor <= this: vague omen, cyclone hunts...
+CYCLONE_FROM_LEG = 2              # ...but only from the 3rd leg on (0-based)
+HELM_FAVOR = 8                    # favor needed to pray to Zeus for Chronos
+PRAYER_COST = 3                   # favor spent on a prayer
+PROTECT_FAVOR = 13                # favor >= this: Zeus keeps the voyage alive
+PROTECTED = ("food", "health", "crew", "hull")
 ROUGH_CELLS_PER_DAMAGE = 2        # rough water: hull damage every 2 cells
 
 # The 2D game's islands that join the voyage as "other" shores (the rest of
@@ -61,7 +66,6 @@ GAME_OVER_TEXT = {
     "food": "The last of the food is gone. The crew starves on the open sea.",
     "health": "Odysseus falls. The voyage ends far from home.",
     "crew": "No one is left to row. The ship drifts forever.",
-    "favor": "The gods turn away. Poseidon drags the ship beneath the waves.",
     "hull": "The hull splits apart. The sea takes the ship.",
 }
 
@@ -72,10 +76,12 @@ def step_seconds(crew):
     return BASE_STEP_SECONDS / (0.45 + 0.55 * crew / MAX_RESOURCES["crew"])
 
 
-def omen_level(favor):
+def omen_level(favor, leg_index=None):
+    """clear / subtle / vague. Leg_index None = ignore the early-leg grace."""
     if favor >= CLEAR_OMEN_FAVOR:
         return "clear"
-    if favor <= CYCLONE_FAVOR:
+    early = leg_index is not None and leg_index < CYCLONE_FROM_LEG
+    if favor <= CYCLONE_FAVOR and not early:
         return "vague"
     return "subtle"
 
@@ -188,6 +194,44 @@ def _harbor_target(island, obstacles):
     return min(cells, key=lambda c: (c[1], abs(c[0] - START[0])))
 
 
+def _island_spot(rng, near=18.0):
+    """Anywhere in the far part of the sea, fully inside the map."""
+    margin = ISLAND_RADIUS + 0.6
+    return (rng.uniform(margin, WIDTH - 1 - margin),
+            rng.uniform(near, LENGTH - 1 - margin - HARBOR_REACH))
+
+
+def _random_krakens(rng, isles, obstacles, routes, count):
+    """One kraken on a random route (so it matters), the rest anywhere."""
+    def ok(cell, placed):
+        x, y = cell
+        return (cell not in obstacles and 6 <= y <= LENGTH - 5
+                and math.hypot(x - START[0], y - START[1]) >= 5
+                and not any(i.in_harbor(cell) or i.covers(cell) for i in isles)
+                and all(math.hypot(x - h["position"][0],
+                                   y - h["position"][1]) >= 4 for h in placed))
+
+    hazards = []
+    for k in range(count * 40):
+        if len(hazards) == count:
+            break
+        if not hazards:
+            route = rng.choice(routes)
+            x, y, _ = route[int(rng.uniform(0.25, 0.8) * (len(route) - 1))]
+        else:
+            x, y = rng.randint(1, WIDTH - 2), rng.randint(6, LENGTH - 5)
+        if not ok((x, y), hazards):
+            continue
+        period = rng.randint(8, 14)
+        hazards.append({
+            "position": (x, y),
+            "radius": rng.choice((0, 1)),
+            "period": period,
+            "active_duration": max(3, round(period * rng.uniform(0.4, 0.65))),
+        })
+    return hazards
+
+
 def generate_leg(index, seed, used_extras=()):
     """Leg `index` (0-based) of the journey with this seed.
     Legs 0..7 have two islands; leg 8 is Ithaca alone. used_extras: 2D-game
@@ -196,8 +240,8 @@ def generate_leg(index, seed, used_extras=()):
     final = index >= islands.ROUTE_LEGS
     for _ in range(300):
         if final:
-            isles = [Island((11.0, 33.5), islands.ITHACA, True, False,
-                            final=True)]
+            isles = [Island(_island_spot(rng, near=26.0), islands.ITHACA,
+                            True, False, final=True)]
         else:
             correct = islands.EPISODES[index]
             wrong = rng.choice([e for e in islands.EPISODES
@@ -207,12 +251,11 @@ def generate_leg(index, seed, used_extras=()):
             if extras and rng.random() < EXTRA_CHANCE:
                 encounter = rng.choice(extras)
                 wrong = EXTRA_ISLANDS[encounter]
-            left = (rng.uniform(4.0, 6.0), rng.uniform(31.0, 34.0))
-            right = (rng.uniform(16.0, 18.0), rng.uniform(31.0, 34.0))
-            if rng.random() < 0.5:
-                left, right = right, left
-            isles = [Island(left, correct, True, False),
-                     Island(right, wrong, False, True, encounter=encounter)]
+            a, b = _island_spot(rng), _island_spot(rng)
+            while math.hypot(a[0] - b[0], a[1] - b[1]) < 2 * ISLAND_RADIUS + 2:
+                b = _island_spot(rng)
+            isles = [Island(a, correct, True, False),
+                     Island(b, wrong, False, True, encounter=encounter)]
 
         reefs = []
         while len(reefs) < 6:
@@ -232,20 +275,8 @@ def generate_leg(index, seed, used_extras=()):
         if not all(open_routes):
             continue
 
-        hazards = []
-        for k in range(2 if final else 3):
-            route = open_routes[k % len(open_routes)]
-            x, y, _ = route[int(rng.uniform(0.3, 0.75) * (len(route) - 1))]
-            if math.hypot(x - START[0], y - START[1]) < 4:
-                continue
-            period = rng.randint(8, 14)
-            hazards.append({
-                "position": (x, y),
-                "radius": rng.choice((0, 1)),
-                "period": period,
-                "active_duration": max(3, round(period *
-                                                rng.uniform(0.4, 0.65))),
-            })
+        hazards = _random_krakens(rng, isles, obstacles, open_routes,
+                                  2 if final else rng.randint(2, 4))
         routes = [planner.plan(START, t, hazards=hazards, start_time=0,
                                max_time=MAX_PLAN_STEPS) for t in targets]
         if all(routes):
@@ -255,24 +286,24 @@ def generate_leg(index, seed, used_extras=()):
 
 # --- rough water: appears as the gods' favor drops ------------------------------
 
-def rough_water_count(favor):
-    if favor >= CLEAR_OMEN_FAVOR:
-        return 0
-    if favor <= CYCLONE_FAVOR:
-        return 4
-    return 2
+def rough_water_count(favor, leg_index=None):
+    level = omen_level(favor, leg_index)
+    return {"clear": 0, "subtle": 2, "vague": 4}[level]
 
 
-def rough_water(leg, favor, rng):
-    """Churning patches [(gx, gy, radius)] on the way to the islands.
-    They never block; sailing through them costs health."""
+def rough_water(leg, favor, rng, leg_index=None):
+    """Churning whirlpools [(gx, gy, radius)]: one on a route, the rest
+    anywhere. They never block; sailing through them damages the hull."""
     patches = []
-    routes = leg.routes
-    for k in range(rough_water_count(favor) * 6):
-        if len(patches) == rough_water_count(favor):
+    count = rough_water_count(favor, leg_index)
+    for k in range(count * 30):
+        if len(patches) == count:
             break
-        route = routes[k % len(routes)]
-        x, y, _ = route[int(rng.uniform(0.2, 0.85) * (len(route) - 1))]
+        if not patches:
+            route = rng.choice(leg.routes)
+            x, y, _ = route[int(rng.uniform(0.2, 0.85) * (len(route) - 1))]
+        else:
+            x, y = rng.uniform(2, WIDTH - 3), rng.uniform(6, LENGTH - 6)
         r = rng.uniform(1.6, 2.4)
         far_from_start = math.hypot(x - START[0], y - START[1]) > r + 3
         clear_of_shore = all(math.hypot(x - i.center[0], y - i.center[1])
@@ -398,17 +429,45 @@ class Journey:
                 self.used_extras.add(island.encounter)
         return leg
 
+    @property
+    def protected(self):
+        """Favor above 12: Zeus will not let the voyage end."""
+        return self.resources["favor"] >= PROTECT_FAVOR
+
     def apply(self, effects):
+        shielded = self.protected
         for key, delta in effects.items():
             value = self.resources[key] + delta
-            self.resources[key] = max(0, min(MAX_RESOURCES[key], value))
+            floor = 1 if shielded and key in PROTECTED else 0
+            self.resources[key] = max(floor, min(MAX_RESOURCES[key], value))
+
+    @property
+    def can_pray(self):
+        return self.resources["favor"] >= HELM_FAVOR
+
+    def pray(self):
+        """Pray to Zeus for Chronos to take the helm. Costs favor."""
+        if not self.can_pray:
+            return False
+        self.apply({"favor": -PRAYER_COST})
+        return True
+
+    def choice_order(self, island):
+        """The order a card's choices are shown in (the better deal is not
+        always first). Same voyage and leg -> same order."""
+        rng = random.Random(f"{self.seed}/{self.leg_index}/{island.name}")
+        order = list(range(len(island.card["choices"])))
+        rng.shuffle(order)
+        return order
 
     def eat(self, seconds):
         self.apply({"food": -FOOD_PER_SECOND * seconds})
 
     def game_over(self):
         """The reason the voyage ended, or None."""
-        for key in ("food", "health", "crew", "favor", "hull"):
+        if self.protected:
+            return None
+        for key in PROTECTED:
             if self.resources[key] <= 0:
                 return key
         return None

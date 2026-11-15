@@ -425,38 +425,217 @@ def reef(radius, seed):
 
 # --- ship ----------------------------------------------------------------------
 
+HULL_BLACK = rgb(34, 28, 24)
+DECK = rgb(112, 82, 52)
+RAIL_RED = rgb(150, 62, 40)
+BRONZE = rgb(176, 134, 72)
+OAR = rgb(140, 104, 64)
+EYE_WHITE = rgb(222, 214, 196)
+SHIELD_COLORS = [rgb(176, 134, 72), rgb(150, 62, 40), rgb(200, 190, 165)]
+WOOD = rgb(150, 105, 60)
+WOOD_DARK = rgb(92, 62, 36)
+
+
+def disc(radius, color, n=18, axis="y"):
+    """A flat round disc facing +/- y (or x), centered on the origin."""
+    pts = [(math.cos(math.tau * i / n) * radius,
+            math.sin(math.tau * i / n) * radius) for i in range(n)]
+    if axis == "y":
+        ring = [Vec3(a, 0, b) for a, b in pts]
+    else:
+        ring = [Vec3(0, a, b) for a, b in pts]
+    c = Vec3(0, 0, 0)
+    node = flat_mesh("disc", [(c, ring[i], ring[(i + 1) % n])
+                              for i in range(n)], color)
+    node.setTwoSided(True)
+    return node
+
+
 def ship():
-    """Dark hull, mast, rust-red sail, oars; faces +x. Returns (node, oars)."""
+    """A Greek galley facing +x: black hull, bronze ram, painted eyes,
+    shields on the rails, curling stern, striped sail, rowers and oars.
+    Returns (node, oars)."""
     root = NodePath("ship")
-    h = [Vec3(-1.8, -0.3, 0.25), Vec3(1.5, -0.3, 0.25), Vec3(2.2, 0, 0.75),
-         Vec3(-1.8, 0.3, 0.25), Vec3(1.5, 0.3, 0.25), Vec3(-1.5, 0, -0.1),
-         Vec3(1.2, 0, -0.1)]
-    tris = [(h[0], h[1], h[6]), (h[0], h[6], h[5]), (h[3], h[5], h[6]),
-            (h[3], h[6], h[4]), (h[1], h[2], h[6]), (h[4], h[6], h[2]),
-            (h[0], h[3], h[1]), (h[1], h[3], h[4])]
-    flat_mesh("hull", tris, HULL).reparentTo(root)
-    lines("prow", HULL, 2, [[Vec3(2.2, 0, 0.75), Vec3(2.6, 0, 1.15)]]
+    # hull: lofted from stations (x, half-width, deck height, keel depth)
+    stations = [(-2.45, 0.04, 1.00, 0.55), (-2.0, 0.30, 0.70, 0.05),
+                (-1.2, 0.46, 0.55, -0.16), (0.0, 0.50, 0.52, -0.22),
+                (1.2, 0.44, 0.55, -0.16), (2.0, 0.24, 0.62, -0.05),
+                (2.5, 0.04, 0.72, 0.05)]
+
+    def section(x, hw, deck, keel, side):
+        return [Vec3(x, side * hw, deck), Vec3(x, side * hw * 0.85,
+                                               (deck + keel) / 2),
+                Vec3(x, 0, keel)]
+
+    hull_tris, deck_tris = [], []
+    for a, b in zip(stations, stations[1:]):
+        for side in (-1, 1):
+            sa, sb = section(*a, side), section(*b, side)
+            for k in range(2):
+                p0, p1, q0, q1 = sa[k], sa[k + 1], sb[k], sb[k + 1]
+                if side > 0:
+                    hull_tris += [(p0, q0, q1), (p0, q1, p1)]
+                else:
+                    hull_tris += [(p0, q1, q0), (p0, p1, q1)]
+        pa, pb = section(*a, -1)[0], section(*b, -1)[0]
+        sa, sb = section(*a, 1)[0], section(*b, 1)[0]
+        deck_tris += [(pa, pb, sb), (pa, sb, sa)]
+    flat_mesh("hull", hull_tris, HULL_BLACK).reparentTo(root)
+    deck = flat_mesh("deck", deck_tris, DECK)
+    deck.setTwoSided(True)
+    deck.reparentTo(root)
+    rail = []
+    for side in (-1, 1):
+        rail.append([Vec3(x, side * (hw + 0.01), d + 0.02)
+                     for x, hw, d, _ in stations])
+    lines("rail", RAIL_RED, 3, rail).reparentTo(root)
+
+    # bronze ram and the painted eyes on the bow
+    ram = flat_mesh("ram", [
+        (Vec3(2.35, -0.12, 0.05), Vec3(3.05, 0, 0.12), Vec3(2.35, 0.12, 0.05)),
+        (Vec3(2.35, -0.12, 0.05), Vec3(2.35, 0, 0.3), Vec3(3.05, 0, 0.12)),
+        (Vec3(2.35, 0.12, 0.05), Vec3(3.05, 0, 0.12), Vec3(2.35, 0, 0.3))],
+        BRONZE)
+    ram.setTwoSided(True)
+    ram.reparentTo(root)
+    for side in (-1, 1):
+        eye = disc(0.13, EYE_WHITE)
+        eye.reparentTo(root)
+        eye.setPos(1.95, side * 0.25, 0.42)
+        eye.setH(side * 28)
+        pupil = disc(0.06, HULL_BLACK)
+        pupil.reparentTo(eye)
+        pupil.setY(side * 0.01)
+
+    # the stern curls up and forward (the aphlaston)
+    curl = [Vec3(-2.45 - 0.35 * math.sin(a), 0,
+                 1.0 + 0.5 * (1 - math.cos(a)) + 0.25 * a)
+            for a in [i / 10 * math.pi * 1.2 for i in range(11)]]
+    lines("stern", HULL_BLACK, 4, [curl]).reparentTo(root)
+
+    # shields along both rails
+    for side in (-1, 1):
+        for k in range(6):
+            x = -1.5 + k * 0.55
+            hw = 0.46 if abs(x) < 1.3 else 0.4
+            shield = disc(0.17, SHIELD_COLORS[k % 3])
+            shield.reparentTo(root)
+            shield.setPos(x, side * (hw + 0.04), 0.62)
+            boss = disc(0.05, BRONZE)
+            boss.reparentTo(shield)
+            boss.setY(side * 0.01)
+
+    # rowers' heads along the deck
+    for side in (-1, 1):
+        for k in range(5):
+            head = sphere(0.09, rgb(60, 42, 30), subdivisions=1, seed=k)
+            head.reparentTo(root)
+            head.setPos(-1.2 + k * 0.6, side * 0.22, 0.72)
+
+    # mast, yard, a striped square sail billowing forward, rigging
+    lines("mast", HULL_BLACK, 3, [[Vec3(0, 0, 0.5), Vec3(0, 0, 4.8)]]
           ).reparentTo(root)
-    lines("mast", HULL, 2.5, [[Vec3(0, 0, 0.25), Vec3(0, 0, 4.6)]]
-          ).reparentTo(root)
-    lines("rigging", HULL, 1, [[Vec3(0, 0, 4.6), Vec3(2.1, 0, 0.75)],
-                               [Vec3(0, 0, 4.6), Vec3(-1.6, 0, 0.3)]]
-          ).reparentTo(root)
-    s = [Vec3(0.05, -1.1, 4.3), Vec3(0.05, 1.1, 4.3), Vec3(0.35, 0.95, 1.5),
-         Vec3(0.35, -0.95, 1.5)]
-    sail = flat_mesh("sail", [(s[0], s[1], s[2]), (s[0], s[2], s[3])], SAIL)
-    sail.setTwoSided(True)
-    sail.reparentTo(root)
+    lines("yard", HULL_BLACK, 2.5, [[Vec3(0.05, -1.3, 4.35),
+                                     Vec3(0.05, 1.3, 4.35)]]).reparentTo(root)
+    rows, cols = 6, 8
+    for r in range(rows):
+        tris = []
+        for c in range(cols):
+            def pt(rr, cc):
+                u, v = cc / cols, rr / rows
+                y = -1.2 + 2.4 * u
+                z = 4.3 - 2.8 * v
+                bulge = 0.45 * math.sin(math.pi * u) * math.sin(math.pi * v)
+                return Vec3(0.08 + bulge, y, z)
+            a, b = pt(r, c), pt(r, c + 1)
+            d, e = pt(r + 1, c), pt(r + 1, c + 1)
+            tris += [(a, b, e), (a, e, d)]
+        band = flat_mesh("sail", tris, SAIL if r % 2 == 0 else CREAM)
+        band.setTwoSided(True)
+        band.reparentTo(root)
+    lines("rigging", HULL_BLACK, 1, [
+        [Vec3(0, 0, 4.8), Vec3(2.45, 0, 0.75)],
+        [Vec3(0, 0, 4.8), Vec3(-2.4, 0, 1.0)],
+        [Vec3(0, 0, 4.6), Vec3(0.2, -0.48, 0.55)],
+        [Vec3(0, 0, 4.6), Vec3(0.2, 0.48, 0.55)]]).reparentTo(root)
+
+    # steering oars at the stern
+    for side in (-1, 1):
+        lines("steering", OAR, 3, [[Vec3(-1.9, side * 0.32, 0.9),
+                                    Vec3(-2.6, side * 0.55, -0.2)]]
+              ).reparentTo(root)
     oars = []
-    for k in range(4):
+    for k in range(10):
         for side in (-1, 1):
             pivot = root.attachNewNode("oar")
-            pivot.setPos(-1.0 + k * 0.6, side * 0.3, 0.3)
-            lines("oar", HULL, 1.5, [[Vec3(0, 0, 0),
-                                      Vec3(0, side * 1.3, -0.45)]]
+            pivot.setPos(-1.55 + k * 0.33, side * 0.46, 0.5)
+            lines("oar", OAR, 2, [[Vec3(0, 0, 0),
+                                   Vec3(0, side * 1.25, -0.55)]]
                   ).reparentTo(pivot)
             oars.append((pivot, side))
     return root, oars
+
+
+def trojan_horse(scale=1.0):
+    """The wooden horse of Troy on its wheeled platform; faces +x."""
+    root = NodePath("trojan-horse")
+
+    def part(sx, sy, sz, color, pos, hpr=(0, 0, 0)):
+        b = box(sx, sy, sz, color)
+        b.reparentTo(root)
+        b.setPos(*pos)
+        b.setHpr(*hpr)
+        return b
+
+    part(3.4, 1.6, 0.25, WOOD_DARK, (0, 0, 0.62))           # platform
+    for x in (-1.3, 1.3):
+        for y in (-0.82, 0.82):
+            w = disc(0.48, WOOD_DARK, n=12)
+            w.reparentTo(root)
+            w.setPos(x, y, 0.48)
+            hub = disc(0.12, BRONZE, n=8)
+            hub.reparentTo(w)
+            hub.setY(0.02 if y > 0 else -0.02)
+    for x in (-1.0, 1.0):                                   # legs
+        for y in (-0.42, 0.42):
+            part(0.3, 0.3, 1.7, WOOD, (x, y, 1.6))
+    part(2.9, 1.2, 1.15, WOOD, (0, 0, 2.95))                 # body
+    part(0.7, 0.62, 1.8, WOOD, (1.45, 0, 4.05), (0, 0, -28))  # neck
+    part(1.25, 0.58, 0.55, WOOD, (2.1, 0, 4.95), (0, 0, 22))  # head
+    part(0.42, 0.5, 0.42, WOOD_DARK, (2.6, 0, 4.72), (0, 0, 22))  # muzzle
+    for y in (-0.18, 0.18):                                  # ears
+        part(0.14, 0.12, 0.4, WOOD_DARK, (1.75, y, 5.35), (0, 0, -15))
+    for k in range(6):                                       # mane
+        part(0.22, 0.14, 0.32, WOOD_DARK,
+             (1.05 + k * 0.2, 0, 3.6 + k * 0.32), (0, 0, -28))
+    part(0.18, 0.18, 1.1, WOOD_DARK, (-1.55, 0, 2.6), (0, 0, 25))  # tail
+    part(0.9, 0.04, 0.55, WOOD_DARK, (0.1, 0.62, 2.9))       # the hidden hatch
+    planks = []
+    for side in (-1, 1):
+        for z in (2.55, 2.85, 3.15, 3.45):
+            planks.append([Vec3(-1.45, side * 0.61, z),
+                           Vec3(1.45, side * 0.61, z)])
+    lines("planks", WOOD_DARK, 1.5, planks).reparentTo(root)
+    root.setScale(scale)
+    return root
+
+
+def lightning(start, end, seed=0):
+    """A jagged bolt from start to end (Zeus answers)."""
+    rng = random.Random(seed)
+    pts = [start]
+    n = 12
+    for i in range(1, n):
+        f = i / n
+        p = start + (end - start) * f
+        pts.append(p + Vec3(rng.uniform(-2.2, 2.2), rng.uniform(-2.2, 2.2), 0))
+    pts.append(end)
+    bolt = lines("bolt", rgb(255, 246, 210), 4, [pts])
+    glow = lines("glow", rgb(255, 220, 140, 110), 10, [pts])
+    glow.reparentTo(bolt)
+    translucent(glow)
+    bolt.setFogOff()
+    return bolt
 
 
 # --- monsters and omens --------------------------------------------------------
