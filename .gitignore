@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 .sound_cache/
+.art_cache/

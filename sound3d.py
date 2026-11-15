@@ -18,7 +18,8 @@ MUSIC = {"title": "music_title.wav", "sea": "music_sea.wav",
 MUSIC_VOLUME = 0.55
 EFFECTS = {"roar": "roar.wav", "splash": "splash.wav",
            "thunder": "thunder.wav", "chime": "chime.wav",
-           "chime_low": "chime_low.wav", "ithaca": "ithaca.wav"}
+           "chime_low": "chime_low.wav", "ithaca": "ithaca.wav",
+           "bow": "bow.wav"}
 FADE_PER_SECOND = 0.6
 
 

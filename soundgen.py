@@ -22,7 +22,7 @@ import wave
 
 import numpy as np
 
-VERSION = "5"
+VERSION = "6"
 SR = 22050                         # samples per second
 D3 = 146.83                        # Hz, the tonic of every mode below
 
@@ -364,6 +364,17 @@ def crowd_cheer(rng, length=4.0):
     return x * np.clip(env, 0, 1)
 
 
+def bow_shot(rng):
+    """The great bow loosed through the twelve axes (the title's easter egg)."""
+    track = np.zeros(int(1.6 * SR))
+    put(track, bowstring(rng), 0.0, 2.6)
+    put(track, arrow_flight(rng), 0.25, 1.1)
+    for k in range(12):
+        put(track, axe_ring(2350 - k * 55), 0.32 + k * 0.05,
+            1.2 * (0.86 ** k) + 0.15)
+    return track
+
+
 def ithaca(rng):
     total = 16.6
     track = np.zeros(int(total * SR))
@@ -438,6 +449,7 @@ def build(folder):
         "chime.wav": chime(880.0),
         "chime_low.wav": chime(440.0 * 2 ** (3 / 12)),
         "ithaca.wav": ithaca(rng),
+        "bow.wav": bow_shot(rng),
     }
     for name, x in sounds.items():
         write(os.path.join(folder, name), x)

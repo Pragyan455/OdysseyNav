@@ -40,6 +40,7 @@ KRAKEN = rgb(112, 30, 44)
 CYCLONE = rgb(170, 190, 200, 120)
 BEAM = rgb(240, 210, 150, 46)
 GULL = rgb(225, 228, 222)
+GOLD_BRIGHT = rgb(255, 236, 170)
 FOAM = rgb(205, 222, 226)
 
 FONT_DIR = "/System/Library/Fonts/Supplemental"
@@ -434,6 +435,11 @@ EYE_WHITE = rgb(222, 214, 196)
 SHIELD_COLORS = [rgb(176, 134, 72), rgb(150, 62, 40), rgb(200, 190, 165)]
 WOOD = rgb(150, 105, 60)
 WOOD_DARK = rgb(92, 62, 36)
+CRIMSON = rgb(158, 58, 66)        # a lighter maroon
+CRIMSON_DARK = rgb(134, 46, 56)
+CHAR = rgb(34, 26, 20)
+TIMBER = rgb(58, 42, 30)
+TIMBER_LIGHT = rgb(86, 62, 42)
 
 
 def disc(radius, color, n=18, axis="y"):
@@ -451,10 +457,11 @@ def disc(radius, color, n=18, axis="y"):
     return node
 
 
-def ship():
-    """A Greek galley facing +x: black hull, bronze ram, painted eyes,
-    shields on the rails, curling stern, striped sail, rowers and oars.
-    Returns (node, oars)."""
+def ship(golden=False):
+    """A grand Greek galley facing +x: black hull, bronze ram, painted eyes,
+    shields on the rails, curling stern, rowers and oars, and red cloth: a
+    crimson sail with gold trim and sun, streamers, a stern awning.
+    golden=True gives a golden sail. Returns (node, oars)."""
     root = NodePath("ship")
     # hull: lofted from stations (x, half-width, deck height, keel depth)
     stations = [(-2.45, 0.04, 1.00, 0.55), (-2.0, 0.30, 0.70, 0.05),
@@ -550,9 +557,64 @@ def ship():
             a, b = pt(r, c), pt(r, c + 1)
             d, e = pt(r + 1, c), pt(r + 1, c + 1)
             tris += [(a, b, e), (a, e, d)]
-        band = flat_mesh("sail", tris, SAIL if r % 2 == 0 else CREAM)
+        if golden:
+            color = GOLD if r % 2 == 0 else rgb(236, 206, 132)
+        else:
+            color = CRIMSON if r % 2 == 0 else CRIMSON_DARK
+        band = flat_mesh("sail", tris, color)
         band.setTwoSided(True)
+        band.setLightOff()
         band.reparentTo(root)
+    # gold trim around the sail and a gold sun on its face
+    edge = [pt(0, c) for c in range(cols + 1)] + \
+        [pt(r, cols) for r in range(rows + 1)] + \
+        [pt(rows, c) for c in range(cols, -1, -1)] + \
+        [pt(r, 0) for r in range(rows, -1, -1)]
+    lines("sail-trim", GOLD, 2.5, [edge]).reparentTo(root)
+    sun = disc(0.34, CRIMSON_DARK if golden else GOLD, n=16, axis="x")
+    sun.reparentTo(root)
+    sun.setLightOff()
+    sun.setPos(0.58, 0, 2.95)
+    rays = []
+    for a in range(0, 360, 30):
+        ca, sa = math.cos(math.radians(a)), math.sin(math.radians(a))
+        rays.append([Vec3(0.57, 0.42 * ca, 2.95 + 0.42 * sa),
+                     Vec3(0.55, 0.62 * ca, 2.95 + 0.62 * sa)])
+    lines("sun-rays", CRIMSON_DARK if golden else GOLD, 2, rays
+          ).reparentTo(root)
+    # crimson streamers flying back from the masthead
+    for k, length in enumerate((2.3, 1.7)):
+        top, bottom = [], []
+        for i in range(13):
+            t = i / 12
+            x = -length * t
+            z = 4.8 - k * 0.22 + 0.16 * math.sin(t * 7 + k)
+            y = 0.1 * math.sin(t * 5)
+            w = 0.16 * (1 - 0.7 * t)
+            top.append(Vec3(x, y, z))
+            bottom.append(Vec3(x, y, z - w))
+        tris = []
+        for i in range(12):
+            tris += [(top[i], top[i + 1], bottom[i + 1]),
+                     (top[i], bottom[i + 1], bottom[i])]
+        flag = flat_mesh("streamer", tris, CRIMSON)
+        flag.setTwoSided(True)
+        flag.setLightOff()
+        flag.reparentTo(root)
+    # a red cloth awning over the stern, gold fringe along its edge
+    a0, a1 = Vec3(-2.25, -0.44, 1.45), Vec3(-1.25, -0.44, 1.2)
+    a2, a3 = Vec3(-1.25, 0.44, 1.2), Vec3(-2.25, 0.44, 1.45)
+    awning = flat_mesh("awning", [(a0, a1, a2), (a0, a2, a3)], CRIMSON)
+    awning.setTwoSided(True)
+    awning.setLightOff()
+    awning.reparentTo(root)
+    lines("awning-posts", HULL_BLACK, 2,
+          [[Vec3(x, y, 0.62), Vec3(x, y, z)] for x, z in ((-1.25, 1.2),
+                                                         (-2.25, 1.45))
+           for y in (-0.42, 0.42)]).reparentTo(root)
+    lines("fringe", GOLD, 1.5,
+          [[Vec3(-1.25, y, 1.2), Vec3(-1.25, y, 1.08)]
+           for y in [-0.42 + i * 0.07 for i in range(13)]]).reparentTo(root)
     lines("rigging", HULL_BLACK, 1, [
         [Vec3(0, 0, 4.8), Vec3(2.45, 0, 0.75)],
         [Vec3(0, 0, 4.8), Vec3(-2.4, 0, 1.0)],
@@ -576,46 +638,113 @@ def ship():
     return root, oars
 
 
-def trojan_horse(scale=1.0):
-    """The wooden horse of Troy on its wheeled platform; faces +x."""
+def timber_beam(p0, p1, thickness, color):
+    """A squared timber from p0 to p1."""
+    v = p1 - p0
+    node = box(thickness, v.length(), thickness, color)
+    node.setPos((p0 + p1) * 0.5)
+    node.lookAt(node.getPos() + v)
+    return node
+
+
+def trojan_horse(scale=1.0, seed=7):
+    """The wooden horse of Troy: colossal, rough-hewn, dark timber, built
+    of beams with gaps you can see through, on a sledge of logs. Faces +x."""
+    rng = random.Random(seed)
     root = NodePath("trojan-horse")
 
-    def part(sx, sy, sz, color, pos, hpr=(0, 0, 0)):
-        b = box(sx, sy, sz, color)
-        b.reparentTo(root)
-        b.setPos(*pos)
-        b.setHpr(*hpr)
-        return b
+    target = [root]
 
-    part(3.4, 1.6, 0.25, WOOD_DARK, (0, 0, 0.62))           # platform
-    for x in (-1.3, 1.3):
-        for y in (-0.82, 0.82):
-            w = disc(0.48, WOOD_DARK, n=12)
-            w.reparentTo(root)
-            w.setPos(x, y, 0.48)
-            hub = disc(0.12, BRONZE, n=8)
-            hub.reparentTo(w)
-            hub.setY(0.02 if y > 0 else -0.02)
-    for x in (-1.0, 1.0):                                   # legs
+    def add(node):
+        node.reparentTo(target[0])
+        return node
+
+    def timber(p0, p1, t=0.16, color=None):
+        jitter = Vec3(rng.uniform(-0.03, 0.03), rng.uniform(-0.03, 0.03), 0)
+        return add(timber_beam(p0 + jitter, p1 - jitter, t * rng.uniform(0.85, 1.2),
+                        color or rng.choice((CHAR, TIMBER, TIMBER))))
+
+    # the sledge and its log rollers
+    add(box(4.6, 2.0, 0.28, CHAR)).setPos(0, 0, 0.62)
+    for x in (-1.7, -0.6, 0.6, 1.7):
+        log = add(timber_beam(Vec3(x, -1.15, 0.28), Vec3(x, 1.15, 0.28), 0.42,
+                       TIMBER))
+        log.setR(0)
+    # four legs, each two raked posts with cross-braces
+    for lx in (-1.25, 1.25):
+        for ly in (-0.55, 0.55):
+            foot, hip = Vec3(lx, ly, 0.75), Vec3(lx * 0.92, ly * 0.95, 2.05)
+            timber(foot + Vec3(-0.14, 0, 0), hip + Vec3(-0.12, 0, 0), 0.3)
+            timber(foot + Vec3(0.14, 0, 0), hip + Vec3(0.12, 0, 0), 0.3)
+            for z in (1.15, 1.65):
+                timber(Vec3(lx - 0.14, ly, z), Vec3(lx + 0.14, ly, z + 0.1),
+                       0.1, TIMBER_LIGHT)
+    # everything above the legs sits lower, so the horse is massive, not
+    # stilted
+    upper = root.attachNewNode("upper")
+    upper.setZ(-0.55)
+    target[0] = upper
+    # the body: a cage of rails and ribs, planked high, open below
+    length, half = 1.75, 0.72
+    for y in (-half, half):
+        for z in (2.55, 3.95):
+            timber(Vec3(-length, y, z), Vec3(length, y, z), 0.2, CHAR)
+        for k in range(10):
+            x = -length + k * (2 * length / 9)
+            timber(Vec3(x, y, 2.5), Vec3(x, y, 4.0), 0.13)
+        for z in [3.3 + i * 0.15 for i in range(5)]:         # side planks
+            p = add(box(2 * length, 0.05, 0.12,
+                        rng.choice((TIMBER, TIMBER_LIGHT, TIMBER))))
+            p.setPos(rng.uniform(-0.05, 0.05), y, z)
+    for x in [-length + i * 0.35 for i in range(11)]:          # roof planks
+        p = add(box(0.3, 2 * half + 0.1, 0.08, rng.choice((TIMBER, CHAR))))
+        p.setPos(x, 0, 4.02)
+    # the chest and a neck that rises steeply to the head
+    timber(Vec3(length, -0.5, 2.6), Vec3(2.3, -0.4, 4.4), 0.24, CHAR)
+    timber(Vec3(length, 0.5, 2.6), Vec3(2.3, 0.4, 4.4), 0.24, CHAR)
+    timber(Vec3(1.2, -0.45, 4.0), Vec3(2.0, -0.35, 5.9), 0.22, CHAR)
+    timber(Vec3(1.2, 0.45, 4.0), Vec3(2.0, 0.35, 5.9), 0.22, CHAR)
+    for k in range(6):
+        f = k / 5
+        a = Vec3(1.3 + f * 0.8, 0, 4.0 + f * 1.8)
+        b = Vec3(2.0 + f * 0.35, 0, 2.8 + f * 1.8)
         for y in (-0.42, 0.42):
-            part(0.3, 0.3, 1.7, WOOD, (x, y, 1.6))
-    part(2.9, 1.2, 1.15, WOOD, (0, 0, 2.95))                 # body
-    part(0.7, 0.62, 1.8, WOOD, (1.45, 0, 4.05), (0, 0, -28))  # neck
-    part(1.25, 0.58, 0.55, WOOD, (2.1, 0, 4.95), (0, 0, 22))  # head
-    part(0.42, 0.5, 0.42, WOOD_DARK, (2.6, 0, 4.72), (0, 0, 22))  # muzzle
-    for y in (-0.18, 0.18):                                  # ears
-        part(0.14, 0.12, 0.4, WOOD_DARK, (1.75, y, 5.35), (0, 0, -15))
-    for k in range(6):                                       # mane
-        part(0.22, 0.14, 0.32, WOOD_DARK,
-             (1.05 + k * 0.2, 0, 3.6 + k * 0.32), (0, 0, -28))
-    part(0.18, 0.18, 1.1, WOOD_DARK, (-1.55, 0, 2.6), (0, 0, 25))  # tail
-    part(0.9, 0.04, 0.55, WOOD_DARK, (0.1, 0.62, 2.9))       # the hidden hatch
-    planks = []
-    for side in (-1, 1):
-        for z in (2.55, 2.85, 3.15, 3.45):
-            planks.append([Vec3(-1.45, side * 0.61, z),
-                           Vec3(1.45, side * 0.61, z)])
-    lines("planks", WOOD_DARK, 1.5, planks).reparentTo(root)
+            timber(a + Vec3(0, y, 0), b + Vec3(0, y * 0.9, 0), 0.1,
+                   TIMBER_LIGHT)
+    # the long, blocky head looking down at Troy
+    head = add(box(1.7, 0.62, 0.62, TIMBER))
+    head.setPos(2.65, 0, 6.0)
+    head.setR(28)
+    snout = add(box(0.7, 0.55, 0.5, CHAR))
+    snout.setPos(3.35, 0, 5.55)
+    snout.setR(28)
+    for y in (-0.2, 0.2):                                       # ears
+        ear = add(box(0.16, 0.1, 0.5, CHAR))
+        ear.setPos(2.0, y, 6.55)
+        ear.setR(-12)
+    for y in (-0.32, 0.32):                                     # eyes: dark holes
+        eye = add(box(0.18, 0.02, 0.12, rgb(8, 6, 6)))
+        eye.setPos(2.6, y, 6.1)
+        eye.setR(28)
+    # a mane of tall upright planks along the neck
+    for k in range(8):
+        f = k / 7
+        plank = add(box(0.1, 0.06, rng.uniform(0.5, 0.9), CHAR))
+        plank.setPos(1.25 + f * 0.75, 0, 4.25 + f * 1.75 + 0.35)
+        plank.setR(rng.uniform(-14, 6))
+    # a tail of hanging rope
+    tail = lines("tail", rgb(120, 96, 66), 2, [[Vec3(-length, rng.uniform(-0.1, 0.1),
+                                              3.7),
+                                         Vec3(-length - 0.4 + i * 0.05,
+                                              rng.uniform(-0.2, 0.2), 2.2)]
+                                        for i in range(7)])
+    tail.reparentTo(upper)
+    # the hidden door, bronze-strapped
+    door = add(box(0.9, 0.04, 0.6, CHAR))
+    door.setPos(0.2, half + 0.05, 3.0)
+    lines("straps", BRONZE, 2,
+          [[Vec3(-0.25, half + 0.08, z), Vec3(0.65, half + 0.08, z)]
+           for z in (2.8, 3.2)]).reparentTo(upper)
     root.setScale(scale)
     return root
 

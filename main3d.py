@@ -30,8 +30,11 @@ if os.environ.get("ODYSSEY_MUTE"):
 from direct.showbase.ShowBase import ShowBase  # noqa: E402
 from direct.gui.OnscreenText import OnscreenText  # noqa: E402
 from direct.gui.DirectGui import DirectButton, DGG  # noqa: E402
+from direct.gui.OnscreenImage import OnscreenImage  # noqa: E402
 
 import look3d as L  # noqa: E402
+import titleart  # noqa: E402
+from eggs3d import Eggs  # noqa: E402
 from sound3d import Sound  # noqa: E402
 from core import journey as J  # noqa: E402
 from core import islands as I  # noqa: E402
@@ -48,6 +51,8 @@ ARROW_BUTTONS = {"arrow_up": KeyboardButton.up(),
                  "arrow_right": KeyboardButton.right()}
 HEADING = {(1, 0): 0.0, (0, 1): 90.0, (-1, 0): 180.0, (0, -1): -90.0}
 TITLE_CAM = (Vec3(0, -26, 3.2), Vec3(0, 60, 4.2))
+TITLE_SHIP = (Vec3(6.8, -3.0, 0), -140.0, 1.3)  # position, heading, scale
+BANNER = (0.0, -0.40, 0.395, 0.0816)        # x, z, half-width, half-height
 CHASE_OFFSET = Vec3(-3.0, -11.0, 5.2)      # camera: behind, above, a bit left
 CHASE_LOOK = Vec3(0.8, 14.0, 0.6)          # ...looking past the ship ahead
 LOW = {"food": 8, "health": 3, "crew": 4, "favor": 3, "hull": 30,
@@ -97,6 +102,8 @@ class Odyssey(ShowBase):
         self.build_hud()
         self.build_card()
         self.build_star_chart()
+        self.golden_sail = False
+        self.eggs = Eggs(self)
 
         self.accept("enter", self.on_enter)
         self.accept("space", self.on_space)
@@ -321,7 +328,15 @@ class Odyssey(ShowBase):
 
     def on_click(self):
         if self.state == "title":
-            self.begin()
+            if not self.mouseWatcherNode.hasMouse():
+                return
+            m = self.mouseWatcherNode.getMouse()
+            if self.eggs.click(m.x, m.y):           # an easter egg
+                return
+            bx, bz, bw, bh = BANNER
+            if (abs(m.x * self.getAspectRatio() - bx) < bw and
+                    abs(m.y - bz) < bh):
+                self.begin()
         elif self.state == "lost" and self.mouseWatcherNode.hasMouse():
             m = self.mouseWatcherNode.getMouse()
             result = self.puzzle.click(m.x * self.getAspectRatio(), m.y)
@@ -349,6 +364,9 @@ class Odyssey(ShowBase):
             self.update_depart(dt)
         self.draw(dt)
         self.update_sound(dt)
+        if self.state == "title":
+            self.hover_banner()
+        self.eggs.update(dt)
         return task.cont
 
     def update_sailing(self, dt):
@@ -793,11 +811,16 @@ class Odyssey(ShowBase):
         L.animate_strokes(self.strokes, t)
         self.stars.setAlphaScale(0.85 + 0.15 * math.sin(t * 1.7))
 
-        if self.state == "depart":
+        if self.state == "title":
+            ship_pos, heading, size = TITLE_SHIP
+            self.ship.setScale(size)
+        elif self.state == "depart":
             ship_pos, heading = self.depart_pose
         else:
             (gx, gy), heading = self.ship_position()
             ship_pos = self.w(gx, gy)
+        if self.state != "title":
+            self.ship.setScale(0.62)
         rough = (self.state == "sail" and
                  J.in_rough_water(self.rough, self.current_cell()))
         roll = 10 * math.sin(t * 6) if rough else 2.5 * math.sin(t * 0.9)
@@ -818,7 +841,7 @@ class Odyssey(ShowBase):
 
         for hazard, node, tentacles, ring, height in self.krakens:
             rise = J.hazard_rise(hazard, sim)
-            if rise <= 0:
+            if rise <= 0 or self.state == "title":
                 node.hide()
                 continue
             node.show()
@@ -833,8 +856,17 @@ class Odyssey(ShowBase):
             self.cyclone_node.hide()
         for g in self.gull_nodes:
             g.setH(t * 35)
+            if self.state == "title":
+                g.hide()
+            else:
+                g.show()
         for spin, caps in self.rough_nodes:
             L.animate_rough(spin, caps, t)
+            patch = spin.getParent()
+            if self.state == "title":
+                patch.hide()
+            else:
+                patch.show()
         if self.state == "title":
             self.cliff.show()
         else:
@@ -906,23 +938,56 @@ class Odyssey(ShowBase):
         ell.reparentTo(root)
         self.text(root, "A VOYAGE BEYOND THE REACH OF TIME", (0, 0.57), 0.035,
                   L.MUTED, self.mono)
-        self.text(root, "ODYSSEY", (0, 0.27), 0.27, L.CREAM, self.serif,
-                  shadow=True)
+        art = titleart.build(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".art_cache"))
+        px = 2.0 / 760                               # one window pixel
+        word = OnscreenImage(image=art["odyssey"], parent=root,
+                             pos=(0, 0, 0.36), scale=(584 * px / 2, 1,
+                                                       106 * px / 2))
+        word.setTransparency(TransparencyAttrib.MAlpha)
         L.lines("rule", L.GOLD, 1.5, [[Vec3(-0.42, 0, 0.17),
                                        Vec3(0.42, 0, 0.17)]]).reparentTo(root)
         self.text(root, L.spaced("THE FRACTURED SEA"), (0, 0.03), 0.055,
                   L.CREAM, self.serif)
         self.text(root, "THE SEA REMEMBERS. TIME DOES NOT.", (0, -0.09), 0.042,
                   L.CREAM, self.serif)
-        self.panel(root, -0.38, 0.38, -0.47, -0.32, alpha=0.92)
-        L.lines("under", L.GOLD, 1.5, [[Vec3(-0.35, 0, -0.495),
-                                        Vec3(0.35, 0, -0.495)]]
-                ).reparentTo(root)
-        self.text(root, L.spaced("BEGIN VOYAGE"), (0, -0.415), 0.05, L.CREAM,
-                  self.serif)
+        bx, bz, bw, bh = BANNER
+        self.banner = {}
+        for key in ("banner", "banner_hover"):
+            img = OnscreenImage(image=art[key], parent=root, pos=(bx, 0, bz),
+                                scale=(bw, 1, bh))
+            img.setTransparency(TransparencyAttrib.MAlpha)
+            self.banner[key] = img
+        self.banner["banner_hover"].hide()
         self.text(root, "PRESS ENTER OR CLICK TO SET SAIL", (0, -0.56), 0.032,
                   L.MUTED, self.mono)
+        self.text(root, "ΑΝΔΡΑ ΜΟΙ ΕΝΝΕΠΕ, ΜΟΥΣΑ, ΠΟΛΥΤΡΟΠΟΝ", (0, -0.84),
+                  0.034, L.GOLD, self.serif)
+        self.text(root, "Tell me, O Muse, of the man of many ways", (0, -0.9),
+                  0.03, L.MUTED, self.italic)
         self.title_root = root
+
+    def grant_golden_sail(self):
+        """The twelve-axes easter egg: a golden sail for the voyage."""
+        if self.golden_sail:
+            return
+        self.golden_sail = True
+        old = self.ship
+        self.ship, self.oars = L.ship(golden=True)
+        self.ship.reparentTo(self.render)
+        self.ship.setTransform(old.getTransform())
+        old.removeNode()
+
+    def hover_banner(self):
+        """Light the BEGIN VOYAGE banner while the mouse is over it."""
+        over = False
+        if self.mouseWatcherNode.hasMouse():
+            m = self.mouseWatcherNode.getMouse()
+            bx, bz, bw, bh = BANNER
+            over = (abs(m.x * self.getAspectRatio() - bx) < bw and
+                    abs(m.y - bz) < bh)
+        self.banner["banner_hover" if over else "banner"].show()
+        self.banner["banner" if over else "banner_hover"].hide()
 
     def build_hud(self):
         root = self.aspect2d.attachNewNode("hud")
