@@ -1,2 +1,2 @@
 # OdysseyNav
-HackUTA 2026 projec
+HackUTA 2026 project

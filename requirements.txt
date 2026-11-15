@@ -1,0 +1,5 @@
+pygame-ce==2.5.8
+pytest==9.2.0
+panda3d==1.10.16
+numpy==2.5.4
+pillow==13.0.0

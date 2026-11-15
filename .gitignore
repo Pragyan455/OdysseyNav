@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+.sound_cache/
+.art_cache/
+brag-output*/
+.vercel/
