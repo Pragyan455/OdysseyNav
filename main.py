@@ -11,6 +11,7 @@ from core.title_scene import CinematicSea
 from core.manual_control import ManualShip
 from core.survival import ShipSurvival
 from core.island_survival import IslandSurvival, DAY_SECONDS
+from core.encounters import EncounterEngine
 
 pygame.init()
 
@@ -92,6 +93,7 @@ def build_world():
     global comparison_results, comparison_mode, oracle_verdict, oracle_mode
     global manual_mode, manual_ship, manual_arrived, survival, defeat
     global island_game, voyage_target, pending_dock, crew_warning
+    global encounters, encounter_island, encounter_message
 
     obstacles = create_obstacles()
     planner = StrategyPlanner(GRID_WIDTH, GRID_HEIGHT, obstacles)
@@ -130,6 +132,9 @@ def build_world():
     manual_arrived = False
     survival = ShipSurvival(repairs=0)
     island_game = IslandSurvival(len(islands))
+    encounters = EncounterEngine()
+    encounter_island = None
+    encounter_message = ""
     voyage_target = GOAL
     pending_dock = None
     crew_warning = False
@@ -419,6 +424,32 @@ def draw_timeline():
     draw_text("RED: STORM   GOLD: WAIT", font_small, MUTED, (x1 - 210, y - 30))
 
 
+def draw_encounter_panel():
+    """Modal island dialogue; no gameplay time advances while choosing."""
+    if encounter_island is None:
+        return
+    encounter = encounters.get(encounter_island)
+    if encounter is None:
+        return
+    veil = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    veil.fill((2, 8, 16, 190))
+    screen.blit(veil, (0, 0))
+    rect = pygame.Rect(170, 160, 860, 400)
+    pygame.draw.rect(screen, PANEL, rect, border_radius=10)
+    pygame.draw.rect(screen, GOLD, rect, 2, border_radius=10)
+    draw_text('THE TRIALS OF ODYSSEUS', font_small, MUTED, (205, 186))
+    draw_text(encounter.title, font_title, GOLD, (205, 218))
+    draw_text(encounter.story, font_normal, WHITE, (205, 290))
+    for index, choice in enumerate(encounter.choices):
+        y = 351 + index * 70
+        pygame.draw.rect(screen, (20, 42, 53), (202, y, 796, 58), border_radius=5)
+        draw_text(f'{index + 1}  {choice.label}', font_normal, GOLD, (220, y + 5))
+        draw_text(choice.description, font_small, WHITE, (220, y + 34))
+    draw_text('PRESS 1 OR 2 TO DECIDE  |  ESC: RETURN TO SEA', font_small, MUTED, (205, 535))
+    if encounter_message:
+        draw_text(encounter_message[:100], font_small, DANGER, (205, 322))
+
+
 def draw_interface():
     pygame.draw.rect(screen, PANEL, (0, 0, WIDTH, 92))
     pygame.draw.line(screen, GOLD, (0, 92), (WIDTH, 92), 1)
@@ -476,6 +507,7 @@ def draw_interface():
     else:
         draw_text("M: TAKE THE HELM", font_small, SAFE, (35, HEIGHT - 96))
     draw_text("E: REPAIR   F: DOCK   G: MEDICINE   CLICK: WAYPOINT", font_small, GOLD, (475, HEIGHT - 96))
+    draw_text(f"TRIALS COMPLETED: {len(encounters.completed)}/8", font_small, GOLD, (840, 95))
 
 # Original procedural cinematic opening; no reference photos or movie assets.
 show_title = True
@@ -643,6 +675,29 @@ while running:
                     begin_voyage()
             elif event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 begin_voyage()
+        elif encounter_island is not None:
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    encounter_island = None
+                    encounter_message = ''
+                elif event.key in (pygame.K_1, pygame.K_2):
+                    decision = 0 if event.key == pygame.K_1 else 1
+                    success, outcome = encounters.resolve(encounter_island, decision, island_game, survival)
+                    if success:
+                        island_id = encounter_island
+                        encounter_island = None
+                        encounter_message = ''
+                        island_game.dock(island_id, simulation_time)
+                        island_game.message = outcome + ' ' + island_game.message
+                        crew_warning = island_game.rest_due(simulation_time)
+                        paused = True
+                        manual_ship.speed = 0
+                        pending_dock = None
+                        if survival.sunk or island_game.failed:
+                            defeat = True
+                        print(island_game.message)
+                    else:
+                        encounter_message = outcome
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not replay_mode and not defeat:
             if 175 < event.pos[1] < HEIGHT - 115 and not DEMO_MODE:
                 waypoint = (int(event.pos[0] // CELL_SIZE), int(event.pos[1] // CELL_SIZE))
@@ -671,13 +726,20 @@ while running:
                 if dock_id is None:
                     island_game.message = 'Approach an island shoreline to dock (F).'
                 else:
-                    island_game.dock(dock_id, simulation_time)
-                    if not island_game.rest_due(simulation_time):
-                        crew_warning = False
-                    paused = True
-                    manual_ship.speed = 0
-                    pending_dock = None
-                    print(island_game.message)
+                    if island_game.last_visit_day.get(dock_id) == island_game.day(simulation_time):
+                        island_game.message = 'Island already searched today. Return tomorrow.'
+                    elif encounters.available(dock_id):
+                        encounter_island = dock_id
+                        encounter_message = ''
+                        paused = True
+                        manual_ship.speed = 0
+                    else:
+                        island_game.dock(dock_id, simulation_time)
+                        crew_warning = island_game.rest_due(simulation_time)
+                        paused = True
+                        manual_ship.speed = 0
+                        pending_dock = None
+                        print(island_game.message)
             elif event.key == pygame.K_m:
                 toggle_helm()
             elif event.key == pygame.K_v:
@@ -808,6 +870,7 @@ while running:
         draw_comparison_panel()
     if oracle_mode:
         draw_oracle_panel()
+    draw_encounter_panel()
     pygame.display.flip()
 
 pygame.quit()
