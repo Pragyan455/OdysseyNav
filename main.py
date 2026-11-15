@@ -7,6 +7,8 @@ from core.narrative import NarrativeEngine
 from core.timeline import VoyageTimeline
 from core.comparison import compare_strategies
 from core.oracle import analyze_strategies
+from core.title_scene import CinematicSea
+from core.manual_control import ManualShip
 
 pygame.init()
 
@@ -79,6 +81,7 @@ def build_world():
     global ship, ithaca, simulation_time, paused, route_exposure, route_duration
     global narrative, timeline, replay_mode, replay_time
     global comparison_results, comparison_mode, oracle_verdict, oracle_mode
+    global manual_mode, manual_ship, manual_arrived
 
     obstacles = create_obstacles()
     planner = StrategyPlanner(GRID_WIDTH, GRID_HEIGHT, obstacles)
@@ -112,6 +115,9 @@ def build_world():
     )
     navigator = Navigator(path)
     ship = grid_to_world(*START)
+    manual_ship = ManualShip(ship.x, ship.y)
+    manual_mode = False
+    manual_arrived = False
     ithaca = grid_to_world(*GOAL)
     simulation_time = 0.0
     paused = True
@@ -150,6 +156,8 @@ def get_ship_position(t):
 
 
 def navigation_status():
+    if manual_mode:
+        return "ARRIVED" if manual_arrived else ("PAUSED" if paused else "MANUAL")
     if not path:
         return "NO ROUTE"
     if navigator.finished:
@@ -300,11 +308,25 @@ def draw_oracle_panel():
 
 def draw_ship(t):
     x, y = ship.x, ship.y + math.sin(t * 2) * 3
-    pygame.draw.polygon(screen, GOLD, [
-        (x - 24, y - 12), (x + 28, y), (x - 24, y + 12), (x - 12, y)
-    ])
-    pygame.draw.line(screen, WHITE, (x - 4, y - 18), (x - 4, y + 18), 2)
+    hull = [(-24, -12), (28, 0), (-24, 12), (-12, 0)]
+    if manual_mode:
+        angle = math.radians(manual_ship.heading)
+        c, sn = math.cos(angle), math.sin(angle)
+        hull = [(x + px * c - py * sn, y + px * sn + py * c)
+                for px, py in hull]
+        mast_a = (x - 4 * c + 18 * sn, y - 4 * sn - 18 * c)
+        mast_b = (x - 4 * c - 18 * sn, y - 4 * sn + 18 * c)
+    else:
+        hull = [(x + px, y + py) for px, py in hull]
+        mast_a, mast_b = (x - 4, y - 18), (x - 4, y + 18)
+    pygame.draw.polygon(screen, GOLD, hull)
+    pygame.draw.line(screen, WHITE, mast_a, mast_b, 2)
     pygame.draw.circle(screen, GOLD, (int(x), int(y)), 30, 1)
+    if manual_mode:
+        angle = math.radians(manual_ship.heading)
+        tip = (x + 38 * math.cos(angle), y + 38 * math.sin(angle))
+        pygame.draw.line(screen, SAFE, (x, y), tip, 3)
+        pygame.draw.circle(screen, SAFE, (round(tip[0]), round(tip[1])), 4)
 
 
 def draw_ithaca():
@@ -385,6 +407,8 @@ def draw_interface():
               font_small, MUTED, (365, 28))
 
     status = "REPLAY" if replay_mode else navigation_status()
+    draw_text("CONTROL: " + ("MANUAL" if manual_mode else "CHRONOS AI"),
+              font_small, SAFE if manual_mode else GOLD, (365, 54))
     draw_text(f"CHRONOS ENGINE: {status}", font_small, GOLD, (840, 28))
     draw_text(f"SIMULATION TIME: {(replay_time if replay_mode else simulation_time):06.1f}",
               font_small, WHITE, (840, 54))
@@ -416,16 +440,139 @@ def draw_interface():
               DANGER if storm_active(replay_time if replay_mode else simulation_time) else SAFE,
               (590, HEIGHT - 42))
     draw_text("T: REPLAY  C: COMPARE  V: ORACLE", font_small, GOLD, (925, HEIGHT - 42))
+    if manual_mode:
+        draw_text(f"MANUAL | W/S THROTTLE  A/D RUDDER  M: AI  SPEED {manual_ship.speed:+.0f}",
+                  font_small, SAFE, (35, HEIGHT - 96))
+    else:
+        draw_text("M: TAKE THE HELM", font_small, SAFE, (35, HEIGHT - 96))
+
+# Original procedural cinematic opening; no reference photos or movie assets.
+show_title = True
+title_elapsed = 0.0
+TITLE_BUTTON = pygame.Rect(WIDTH // 2 - 184, 538, 368, 65)
+font_hero = pygame.font.SysFont("timesnewroman", 118)
+font_subtitle = pygame.font.SysFont("georgia", 22)
+font_kicker = pygame.font.SysFont("consolas", 13)
+font_eyebrow = pygame.font.SysFont("georgia", 15)
+TITLE_SCENE = CinematicSea(WIDTH, HEIGHT)
+
+
+def draw_title_screen(t):
+    """Animated, wholly original ocean scene and interactive voyage button."""
+    TITLE_SCENE.draw(screen, t)
+
+    center = WIDTH // 2
+    kicker = font_kicker.render("A VOYAGE BEYOND THE REACH OF TIME", True,
+                                (182, 184, 178))
+    screen.blit(kicker, kicker.get_rect(center=(center, 155)))
+
+    # A soft shadow ensures the title remains readable over the photograph.
+    title_shadow = font_hero.render("ODYSSEY", True, (0, 5, 10))
+    screen.blit(title_shadow, title_shadow.get_rect(center=(center + 3, 257)))
+    title = font_hero.render("ODYSSEY", True, (232, 218, 185))
+    screen.blit(title, title.get_rect(center=(center, 253)))
+
+    pygame.draw.line(screen, (182, 154, 109), (center - 165, 327),
+                     (center + 165, 327), 1)
+    subtitle = font_subtitle.render("T H E   F R A C T U R E D   S E A", True,
+                                    (218, 211, 194))
+    screen.blit(subtitle, subtitle.get_rect(center=(center, 370)))
+    tagline = font_eyebrow.render("THE SEA REMEMBERS. TIME DOES NOT.", True,
+                                  (188, 198, 198))
+    screen.blit(tagline, tagline.get_rect(center=(center, 417)))
+
+    hovered = TITLE_BUTTON.collidepoint(pygame.mouse.get_pos())
+    pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_HAND if hovered
+                            else pygame.SYSTEM_CURSOR_ARROW)
+    button_layer = pygame.Surface(TITLE_BUTTON.size, pygame.SRCALPHA)
+    button_layer.fill((13, 21, 27, 225 if hovered else 195))
+    screen.blit(button_layer, TITLE_BUTTON.topleft)
+    pygame.draw.rect(screen, (245, 218, 162) if hovered else (178, 155, 115),
+                     TITLE_BUTTON, 2 if hovered else 1)
+    if hovered:
+        pygame.draw.line(screen, (246, 220, 174),
+                         (TITLE_BUTTON.x + 15, TITLE_BUTTON.bottom + 6),
+                         (TITLE_BUTTON.right - 15, TITLE_BUTTON.bottom + 6), 2)
+    label = font_subtitle.render("B E G I N   V O Y A G E", True,
+                                 (255, 238, 201) if hovered else (226, 208, 175))
+    screen.blit(label, label.get_rect(center=TITLE_BUTTON.center))
+    hint = font_kicker.render("PRESS ENTER OR CLICK TO SET SAIL", True,
+                              (177, 184, 183))
+    screen.blit(hint, hint.get_rect(center=(center, 631)))
+    footer = font_kicker.render("CHRONOS  /  THE COUNCIL OF FATES  /  THE ORACLE", True,
+                                (158, 169, 169))
+    screen.blit(footer, footer.get_rect(center=(center, HEIGHT - 31)))
+
+
+def begin_voyage():
+    global show_title
+    show_title = False
+
+
+def ship_cell():
+    gx = max(0, min(GRID_WIDTH - 1, int(ship.x // CELL_SIZE)))
+    gy = max(0, min(GRID_HEIGHT - 1, int(ship.y // CELL_SIZE)))
+    return gx, gy
+
+
+def blocked_at(px, py):
+    return (int(px // CELL_SIZE), int(py // CELL_SIZE)) in obstacles
+
+
+def toggle_helm():
+    """Hand control to the player, or replan from the player's current position."""
+    global manual_mode, manual_ship, path, navigator, timeline, paused
+    global route_duration, route_exposure, replay_mode, manual_arrived
+    if replay_mode:
+        return
+    if not manual_mode:
+        manual_ship = ManualShip(ship.x, ship.y)
+        manual_mode = True
+        manual_arrived = False
+        paused = True  # player presses SPACE to start sailing
+        return
+    # Resume AI from the current location and the current storm phase.
+    new_path = planner.plan_strategy(
+        ship_cell(), GOAL, hazards=hazards, strategy=STRATEGY,
+        start_time=int(simulation_time), max_time=int(simulation_time) + 150
+    )
+    if not new_path:
+        print("Chronos: cannot find a safe route from this position; remain in manual mode")
+        return
+    path = new_path
+    navigator = Navigator(path)
+    timeline = VoyageTimeline(path, hazards)
+    route_duration = path[-1][2] - path[0][2]
+    route_exposure = sum(planner.risk_at(x, y, t, hazards) for x, y, t in path[1:])
+    manual_mode = False
+    paused = True
+
 
 running = True
 
 while running:
     dt = clock.tick(FPS) / 1000.0
+    if show_title:
+        title_elapsed += dt
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
+        elif show_title:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if TITLE_BUTTON.collidepoint(event.pos):
+                    begin_voyage()
+            elif event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                begin_voyage()
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_v:
+            if event.key == pygame.K_ESCAPE:
+                show_title = True
+                paused = True
+                replay_mode = False
+                comparison_mode = False
+                oracle_mode = False
+            elif event.key == pygame.K_m:
+                toggle_helm()
+            elif event.key == pygame.K_v:
                 oracle_mode = not oracle_mode
                 if oracle_mode:
                     comparison_mode = False
@@ -433,7 +580,7 @@ while running:
                 comparison_mode = not comparison_mode
                 if comparison_mode:
                     oracle_mode = False
-            elif event.key == pygame.K_t and path:
+            elif event.key == pygame.K_t and path and not manual_mode:
                 if not replay_mode:
                     replay_mode = True
                     replay_time = timeline.clamp(simulation_time)
@@ -450,7 +597,7 @@ while running:
                 else:
                     replay_time = timeline.clamp(replay_time + (
                         -1 if event.key == pygame.K_LEFT else 1))
-            elif event.key == pygame.K_SPACE and not replay_mode and path and not navigator.finished:
+            elif event.key == pygame.K_SPACE and not replay_mode and (manual_mode or (path and not navigator.finished)):
                 paused = not paused
             elif event.key in (pygame.K_1, pygame.K_2):
                 selected_demo = event.key == pygame.K_2
@@ -472,8 +619,26 @@ while running:
                 navigator.reset()
                 narrative.reset()
                 ship.update(grid_to_world(*START))
+                manual_ship = ManualShip(ship.x, ship.y)
+                manual_arrived = False
 
-    if not paused and not replay_mode and path:
+    if show_title:
+        draw_title_screen(title_elapsed)
+        pygame.display.flip()
+        continue
+
+    if manual_mode and not paused and not replay_mode:
+        simulation_time += dt
+        keys = pygame.key.get_pressed()
+        throttle = int(keys[pygame.K_w] or keys[pygame.K_UP]) - int(keys[pygame.K_s] or keys[pygame.K_DOWN])
+        rudder = int(keys[pygame.K_d] or keys[pygame.K_RIGHT]) - int(keys[pygame.K_a] or keys[pygame.K_LEFT])
+        manual_ship.step(dt, throttle, rudder, blocked_at, WIDTH, HEIGHT)
+        ship.update(manual_ship.x, manual_ship.y)
+        if ship.distance_to(ithaca) < CELL_SIZE * 0.7:
+            manual_arrived = True
+            paused = True
+            manual_ship.speed = 0
+    elif not manual_mode and not paused and not replay_mode and path:
         simulation_time += dt
         navigator.update(simulation_time)
         ship.update(get_ship_position(simulation_time))
