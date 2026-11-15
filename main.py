@@ -9,6 +9,8 @@ from core.comparison import compare_strategies
 from core.oracle import analyze_strategies
 from core.title_scene import CinematicSea
 from core.manual_control import ManualShip
+from core.survival import ShipSurvival
+from core.island_survival import IslandSurvival, DAY_SECONDS
 
 pygame.init()
 
@@ -47,7 +49,14 @@ PASSAGE_Y = START[1]
 PASSAGE_START = 10
 PASSAGE_END = 37
 
-islands = [(360, 250, 65), (580, 440, 85), (790, 260, 75)]
+# Additional explorable islands. Centers are kept clear of Troy and Ithaca.
+islands = [
+    (360, 250, 55), (580, 440, 65), (790, 260, 60),
+    (245, 530, 42), (470, 160, 38), (930, 515, 48),
+    (1020, 220, 36), (720, 570, 38),
+]
+ISLAND_NAMES = ["Aeolia", "Circe's Isle", "The Sirens", "Thrinacia",
+                "Ogygia", "Phaeacia", "Lotus Shore", "Calypso's Haven"]
 
 
 def grid_to_world(x, y):
@@ -81,7 +90,8 @@ def build_world():
     global ship, ithaca, simulation_time, paused, route_exposure, route_duration
     global narrative, timeline, replay_mode, replay_time
     global comparison_results, comparison_mode, oracle_verdict, oracle_mode
-    global manual_mode, manual_ship, manual_arrived
+    global manual_mode, manual_ship, manual_arrived, survival, defeat
+    global island_game, voyage_target, pending_dock, crew_warning
 
     obstacles = create_obstacles()
     planner = StrategyPlanner(GRID_WIDTH, GRID_HEIGHT, obstacles)
@@ -118,6 +128,12 @@ def build_world():
     manual_ship = ManualShip(ship.x, ship.y)
     manual_mode = False
     manual_arrived = False
+    survival = ShipSurvival(repairs=0)
+    island_game = IslandSurvival(len(islands))
+    voyage_target = GOAL
+    pending_dock = None
+    crew_warning = False
+    defeat = False
     ithaca = grid_to_world(*GOAL)
     simulation_time = 0.0
     paused = True
@@ -156,6 +172,8 @@ def get_ship_position(t):
 
 
 def navigation_status():
+    if defeat:
+        return "SUNK"
     if manual_mode:
         return "ARRIVED" if manual_arrived else ("PAUSED" if paused else "MANUAL")
     if not path:
@@ -213,10 +231,13 @@ def draw_islands():
         draw_text("THE NARROWS", font_small, MUTED, (left + 10, channel_y - 44))
         return
 
-    for x, y, radius in islands:
+    for index, (x, y, radius) in enumerate(islands):
         pygame.draw.circle(screen, (25, 43, 53), (x, y), radius + 9)
         pygame.draw.circle(screen, ISLAND, (x, y), radius)
         pygame.draw.circle(screen, GOLD, (x, y), radius, 1)
+        draw_text(ISLAND_NAMES[index], font_small, GOLD, (x - radius, y - radius - 20))
+        if index in island_game.visited:
+            pygame.draw.circle(screen, SAFE, (x, y), 6)
 
 
 def draw_navigation_path():
@@ -416,11 +437,20 @@ def draw_interface():
     draw_text(f"ROUTE STEPS REMAINING: {remaining}",
               font_small, MUTED, (570, 54))
 
+    hull_color = SAFE if survival.hull > 60 else (GOLD if survival.hull > 30 else DANGER)
+    draw_text(f"HULL: {survival.hull:3d}%   STORM HITS: {survival.hits}",
+              font_small, hull_color, (35, 95))
+    draw_text(f"DAY {island_game.day(simulation_time)+1}  |  FOOD {island_game.food}  WOOD {island_game.wood}  ROPE {island_game.rope}  MORALE {island_game.morale}%",
+              font_small, GOLD, (365, 95))
+    draw_text(island_game.message[:110], font_small, DANGER if crew_warning else SAFE, (35, 155))
     if path:
         draw_text(f"ETA: {route_duration}s   STORM EXPOSURE: {route_exposure:.2f}",
                   font_small, MUTED, (35, 115))
 
-    if status == "WAITING":
+    if status == "SUNK":
+        draw_text("YOUR SHIP HAS SUNK — PRESS R TO RETRY",
+                  font_normal, DANGER, (355, 135))
+    elif status == "WAITING":
         draw_text("POSEIDON BLOCKS THE PASSAGE — HOLD POSITION",
                   font_small, DANGER, (325, 135))
     elif status == "ARRIVED":
@@ -445,6 +475,7 @@ def draw_interface():
                   font_small, SAFE, (35, HEIGHT - 96))
     else:
         draw_text("M: TAKE THE HELM", font_small, SAFE, (35, HEIGHT - 96))
+    draw_text("E: REPAIR   F: DOCK   G: MEDICINE   CLICK: WAYPOINT", font_small, GOLD, (475, HEIGHT - 96))
 
 # Original procedural cinematic opening; no reference photos or movie assets.
 show_title = True
@@ -519,11 +550,60 @@ def blocked_at(px, py):
     return (int(px // CELL_SIZE), int(py // CELL_SIZE)) in obstacles
 
 
+def nearby_island():
+    """Return island index only when the ship is alongside its shore."""
+    if DEMO_MODE:
+        return None
+    for index, (x, y, radius) in enumerate(islands):
+        distance = ship.distance_to((x, y))
+        if radius + 15 <= distance <= radius + 62:
+            return index
+    return None
+
+
+def nearest_dock():
+    """Find a traversable shoreline grid cell for the nearest island."""
+    candidates = []
+    for index, (ix, iy, radius) in enumerate(islands):
+        for gx in range(1, GRID_WIDTH - 1):
+            for gy in range(4, GRID_HEIGHT - 4):
+                if (gx, gy) in obstacles:
+                    continue
+                center = grid_to_world(gx, gy)
+                distance = center.distance_to((ix, iy))
+                if radius + 20 <= distance <= radius + 48:
+                    candidates.append((ship.distance_to(center), index, (gx, gy)))
+    candidates.sort(key=lambda item: item[0])
+    return candidates[:30]
+
+
+def set_waypoint(target):
+    """Replan without teleporting or resetting the simulation clock."""
+    global path, navigator, timeline, route_duration, route_exposure, voyage_target, paused
+    if target in obstacles or not (0 <= target[0] < GRID_WIDTH and 0 <= target[1] < GRID_HEIGHT):
+        island_game.message = 'Cannot sail onto land. Choose open water.'
+        return False
+    new_path = planner.plan_strategy(ship_cell(), target, hazards=hazards,
+                    strategy=STRATEGY, start_time=int(simulation_time),
+                    max_time=int(simulation_time) + 160)
+    if not new_path:
+        island_game.message = 'Chronos cannot find a safe route there.'
+        return False
+    path = new_path
+    navigator = Navigator(path)
+    timeline = VoyageTimeline(path, hazards)
+    route_duration = path[-1][2] - path[0][2]
+    route_exposure = sum(planner.risk_at(x,y,t,hazards) for x,y,t in path[1:])
+    voyage_target = target
+    paused = False
+    return True
+
+
 def toggle_helm():
     """Hand control to the player, or replan from the player's current position."""
     global manual_mode, manual_ship, path, navigator, timeline, paused
     global route_duration, route_exposure, replay_mode, manual_arrived
-    if replay_mode:
+    if replay_mode or defeat:
         return
     if not manual_mode:
         manual_ship = ManualShip(ship.x, ship.y)
@@ -533,7 +613,7 @@ def toggle_helm():
         return
     # Resume AI from the current location and the current storm phase.
     new_path = planner.plan_strategy(
-        ship_cell(), GOAL, hazards=hazards, strategy=STRATEGY,
+        ship_cell(), voyage_target, hazards=hazards, strategy=STRATEGY,
         start_time=int(simulation_time), max_time=int(simulation_time) + 150
     )
     if not new_path:
@@ -563,6 +643,13 @@ while running:
                     begin_voyage()
             elif event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 begin_voyage()
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not replay_mode and not defeat:
+            if 175 < event.pos[1] < HEIGHT - 115 and not DEMO_MODE:
+                waypoint = (int(event.pos[0] // CELL_SIZE), int(event.pos[1] // CELL_SIZE))
+                if manual_mode:
+                    island_game.message = 'Switch to Chronos AI (M) to set waypoints.'
+                elif set_waypoint(waypoint):
+                    island_game.message = 'Chronos sailing toward selected waypoint.'
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 show_title = True
@@ -570,6 +657,27 @@ while running:
                 replay_mode = False
                 comparison_mode = False
                 oracle_mode = False
+            elif event.key == pygame.K_e and not replay_mode and not defeat:
+                island_game.repair(survival)
+            elif event.key == pygame.K_g and not replay_mode and not defeat:
+                if island_game.medicine and island_game.morale < 100:
+                    island_game.medicine -= 1
+                    island_game.morale = min(100, island_game.morale + 30)
+                    island_game.message = 'Medicine restored 30 crew morale.'
+                else:
+                    island_game.message = 'No medicine available, or morale already full.'
+            elif event.key == pygame.K_f and not replay_mode and not defeat:
+                dock_id = nearby_island()
+                if dock_id is None:
+                    island_game.message = 'Approach an island shoreline to dock (F).'
+                else:
+                    island_game.dock(dock_id, simulation_time)
+                    if not island_game.rest_due(simulation_time):
+                        crew_warning = False
+                    paused = True
+                    manual_ship.speed = 0
+                    pending_dock = None
+                    print(island_game.message)
             elif event.key == pygame.K_m:
                 toggle_helm()
             elif event.key == pygame.K_v:
@@ -597,7 +705,7 @@ while running:
                 else:
                     replay_time = timeline.clamp(replay_time + (
                         -1 if event.key == pygame.K_LEFT else 1))
-            elif event.key == pygame.K_SPACE and not replay_mode and (manual_mode or (path and not navigator.finished)):
+            elif event.key == pygame.K_SPACE and not defeat and not replay_mode and (manual_mode or (path and not navigator.finished)):
                 paused = not paused
             elif event.key in (pygame.K_1, pygame.K_2):
                 selected_demo = event.key == pygame.K_2
@@ -614,18 +722,27 @@ while running:
                     STRATEGY = selected
                     build_world()
             elif event.key == pygame.K_r:
-                simulation_time = 0.0
-                paused = True
-                navigator.reset()
-                narrative.reset()
-                ship.update(grid_to_world(*START))
-                manual_ship = ManualShip(ship.x, ship.y)
-                manual_arrived = False
+                build_world()
 
     if show_title:
         draw_title_screen(title_elapsed)
         pygame.display.flip()
         continue
+
+    # A two-day voyage requires a mandatory island stop. Chronos diverts
+    # automatically; manual captains receive a warning and must find a shore.
+    if not DEMO_MODE and not replay_mode and not defeat:
+        crew_warning = island_game.rest_due(simulation_time)
+        if crew_warning and not manual_mode and pending_dock is None and not paused:
+            for _, island_id, dock_cell in nearest_dock():
+                if set_waypoint(dock_cell):
+                    pending_dock = island_id
+                    island_game.message = f'CREW REST REQUIRED: heading to {ISLAND_NAMES[island_id]}. Press F at shore.'
+                    break
+        if pending_dock is not None and nearby_island() == pending_dock:
+            paused = True
+            island_game.message = f'ARRIVED AT {ISLAND_NAMES[pending_dock]}: press F to land and resupply.'
+            pending_dock = None
 
     if manual_mode and not paused and not replay_mode:
         simulation_time += dt
@@ -634,7 +751,7 @@ while running:
         rudder = int(keys[pygame.K_d] or keys[pygame.K_RIGHT]) - int(keys[pygame.K_a] or keys[pygame.K_LEFT])
         manual_ship.step(dt, throttle, rudder, blocked_at, WIDTH, HEIGHT)
         ship.update(manual_ship.x, manual_ship.y)
-        if ship.distance_to(ithaca) < CELL_SIZE * 0.7:
+        if ship.distance_to(ithaca) < CELL_SIZE * 0.7 and not island_game.rest_due(simulation_time):
             manual_arrived = True
             paused = True
             manual_ship.speed = 0
@@ -644,7 +761,23 @@ while running:
         ship.update(get_ship_position(simulation_time))
         if navigator.finished:
             paused = True
-            ship.update(grid_to_world(*GOAL))
+            ship.update(grid_to_world(*voyage_target))
+            if voyage_target != GOAL:
+                island_game.message = 'Waypoint reached. Press F if alongside an island, or click another destination.' 
+
+    # Starving sailors lose morale if a captain ignores the required stop.
+    if island_game.failed:
+        defeat = True
+        paused = True
+    # Storm damage is based on the vessel's actual position, not the route preview.
+    if not paused and not replay_mode and not defeat:
+        if survival.update(ship.x / CELL_SIZE, ship.y / CELL_SIZE,
+                           simulation_time, hazards):
+            print(f"POSEIDON STRIKES! Hull integrity: {survival.hull}%")
+        if survival.sunk:
+            defeat = True
+            paused = True
+            manual_ship.speed = 0.0
 
     # Story reacts to the actual ship position and navigation state.
     if path and not replay_mode:
