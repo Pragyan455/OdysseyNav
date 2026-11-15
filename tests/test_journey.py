@@ -57,6 +57,8 @@ def test_choices_resolve_with_text():
     j = journey.Journey(5)
     leg = j.leg()
     for island in leg.islands:
+        if island.encounter is not None:
+            continue                       # once per voyage: tested below
         for k in range(len(island.card["choices"])):
             text, effects = j.resolve(island, k)
             assert text and isinstance(effects, dict)
@@ -105,3 +107,92 @@ def test_rough_water_grows_as_favor_drops():
     for x, y, r in journey.rough_water(leg, 2, random.Random(1)):
         assert not journey.in_rough_water([(x, y, r)], journey.START)
         assert journey.in_rough_water([(x, y, r)], (round(x), round(y)))
+
+
+# --- merged from the 2D game: hull, materials, its islands, Chronos helm ----
+
+def find_extra_leg():
+    for seed in range(40):
+        for index in range(islands.ROUTE_LEGS):
+            leg = journey.generate_leg(index, seed)
+            for isle in leg.islands:
+                if isle.encounter is not None:
+                    return seed, index, isle
+    raise AssertionError("no 2D-game island in 40 seeds")
+
+
+def test_2d_islands_appear_once_per_voyage():
+    for seed in range(8):
+        j, seen = journey.Journey(seed), []
+        for _ in range(islands.ROUTE_LEGS):
+            seen += [i.encounter for i in j.leg().islands
+                     if i.encounter is not None]
+            j.next_leg()
+        assert len(seen) == len(set(seen))
+        assert set(seen) <= set(journey.EXTRA_ISLANDS)
+
+
+def test_2d_encounter_effects_map_onto_our_resources():
+    seed, index, isle = find_extra_leg()
+    j = journey.Journey(seed)
+    j.resources.update(food=20.0, wood=3, rope=2, favor=6, hull=60)
+    before = dict(j.resources)
+    text, effects = j.resolve(isle, 1)
+    assert text and effects is not None
+    for key, delta in effects.items():
+        assert math.isclose(j.resources[key], before[key] + delta)
+    again, none = j.resolve(isle, 0)       # once per voyage
+    assert none is None
+
+
+def test_unaffordable_2d_choice_keeps_the_card_open():
+    j = journey.Journey(1)
+    phaeacia = journey.Island((5, 30), journey.EXTRA_ISLANDS[5], False, True,
+                              encounter=5)
+    j.resources.update(food=1.0, wood=0)
+    text, effects = j.resolve(phaeacia, 0)  # needs 2 rations
+    assert effects is None and "Need" in text
+    assert j.encounters.available(5)
+
+
+def test_repair_and_heal():
+    j = journey.Journey(1)
+    assert "need" in j.repair().lower()
+    j.resources.update(wood=2, rope=1, hull=40)
+    j.repair()
+    assert j.resources["hull"] == 40 + journey.REPAIR_HULL
+    assert (j.resources["wood"], j.resources["rope"]) == (0, 0)
+    j.resources.update(medicine=1, health=5)
+    j.heal()
+    assert j.resources["health"] == 5 + journey.HEAL_HEALTH
+    assert j.resources["medicine"] == 0
+
+
+def test_hull_zero_ends_the_voyage():
+    j = journey.Journey(1)
+    j.apply(journey.KRAKEN_DAMAGE)
+    assert j.resources["hull"] < journey.MAX_RESOURCES["hull"]
+    j.apply({"hull": -1000})
+    assert j.game_over() == "hull"
+
+
+def test_loot_on_landing():
+    j = journey.Journey(3)
+    found = j.loot()
+    for k, v in found.items():
+        lo, hi = journey.LOOT[k]
+        assert lo <= v <= hi and j.resources[k] >= v
+
+
+def test_chronos_helm_reaches_the_true_island_safely():
+    checker = ChronosPlanner(1, 1)
+    for seed in range(4):
+        leg = journey.generate_leg(seed, seed)
+        checker.obstacles = leg.obstacles
+        correct = next(i for i in leg.islands if i.correct)
+        for strategy in journey.HELM_STRATEGIES:
+            path = journey.helm_route(leg, journey.START, 3, strategy)
+            assert path and leg.landed(path[-1][:2]) is correct
+            assert path[0][:2] == journey.START and path[0][2] >= 3
+            for x, y, t in path:
+                assert not checker.is_blocked(x, y, t, leg.hazards)

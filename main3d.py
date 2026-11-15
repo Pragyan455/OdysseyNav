@@ -36,6 +36,7 @@ from core import journey as J  # noqa: E402
 from core import islands as I  # noqa: E402
 from core.cyclone import Cyclone  # noqa: E402
 from core.starpuzzle import StarPuzzle  # noqa: E402
+from core.narrative import NarrativeEngine  # noqa: E402  (teammate's)
 
 CELL = 2.0                                   # world units per grid cell
 ARROW_MOVES = {"arrow_up": (0, 1), "arrow_down": (0, -1),
@@ -46,7 +47,10 @@ ARROW_BUTTONS = {"arrow_up": KeyboardButton.up(),
                  "arrow_right": KeyboardButton.right()}
 HEADING = {(1, 0): 0.0, (0, 1): 90.0, (-1, 0): 180.0, (0, -1): -90.0}
 TITLE_CAM = (Vec3(0, -26, 3.2), Vec3(0, 60, 4.2))
-LOW = {"food": 8, "health": 3, "crew": 4, "favor": 3}
+LOW = {"food": 8, "health": 3, "crew": 4, "favor": 3, "hull": 30,
+       "wood": -1, "rope": -1, "medicine": -1}
+HELM_COLOR = {"survival": L.rgb(110, 190, 180), "balanced": L.GOLD,
+              "speed": L.DANGER}
 DEPART_SECONDS = 2.6          # sailing around the island you landed on
 
 
@@ -94,8 +98,11 @@ class Odyssey(ShowBase):
         self.accept("enter", self.on_enter)
         self.accept("space", self.on_space)
         self.accept("mouse1", self.on_click)
-        self.accept("1", self.choose, [0])
-        self.accept("2", self.choose, [1])
+        for k in range(3):
+            self.accept(str(k + 1), self.on_number, [k])
+        self.accept("h", self.toggle_helm)
+        self.accept("e", self.repair)
+        self.accept("m", self.heal)
         self.accept("r", self.restart_voyage)
         self.accept("n", self.new_voyage)
         self.accept("escape", self.userExit)
@@ -156,7 +163,7 @@ class Odyssey(ShowBase):
         self.started = False
         self.paused = False
         self.invulnerable_until = -1.0
-        self.flash, self.flash_until = "", 0.0
+        self.flash, self.flash_until, self.flash_color = "", 0.0, L.DANGER
         self.puzzle = None
         self.chart_root.hide()
         self.cyclone = None
@@ -170,6 +177,11 @@ class Odyssey(ShowBase):
         if self.rough and self.state != "title":
             self.show_flash("THE SEA GROWS ROUGH AS THE GODS TURN AWAY")
         self.kraken_up = [False] * len(self.krakens)
+        self.helm = None
+        self.helm_strategy = getattr(self, "helm_strategy", "balanced")
+        self.draw_helm_thread()
+        self.story = NarrativeEngine()
+        self.beat, self.beat_until = "", 0.0
         self.star_seen = 0
         self.ending = None
         self.card_root.hide()
@@ -254,6 +266,10 @@ class Odyssey(ShowBase):
     # =========================================================================
 
     def press_arrow(self, name):
+        if self.helm and self.state == "sail":
+            self.helm = None
+            self.draw_helm_thread()
+            self.show_flash("YOU TAKE THE HELM", L.GOLD)
         if name in self.arrow_order:
             self.arrow_order.remove(name)
         self.arrow_order.append(name)
@@ -325,9 +341,10 @@ class Odyssey(ShowBase):
         self.sim += steps
         j.eat(dt)
         t = self.sim
-        arrow = self.held_arrow()
+        arrow, helm_start = self.helm_command(t) if self.helm else \
+            (self.held_arrow(), None)
 
-        next_start = t
+        next_start = t if helm_start is None else min(t, helm_start)
         if self.move_to and t - self.move_start >= 1.0:
             self.cell, self.move_to = self.move_to, None
             next_start = self.move_start + 1.0
@@ -338,9 +355,14 @@ class Odyssey(ShowBase):
             if J.in_rough_water(self.rough, self.cell):
                 self.rough_cells += 1
                 if self.rough_cells % J.ROUGH_CELLS_PER_DAMAGE == 0:
-                    j.apply({"health": -1})
-                    self.show_flash("ROUGH WATER   -1 HEALTH")
+                    j.apply(J.ROUGH_DAMAGE)
+                    self.show_flash("ROUGH WATER   "
+                                    f"{J.ROUGH_DAMAGE['hull']} HULL")
                     self.sound.play("splash", 0.6)
+            if self.helm:
+                arrow, helm_start = self.helm_command(t)
+                if helm_start is not None:
+                    next_start = helm_start
         if self.move_to is None and arrow:
             dx, dy = ARROW_MOVES[arrow]
             target = (self.cell[0] + dx, self.cell[1] + dy)
@@ -354,7 +376,8 @@ class Odyssey(ShowBase):
             self.invulnerable_until = t + J.INVULNERABLE_STEPS
             self.sound.play("roar", 1.0)
             self.sound.play("splash", 0.9)
-            self.show_flash("THE KRAKEN STRIKES   -3 HEALTH   -1 CREW")
+            self.show_flash(f"THE KRAKEN STRIKES   "
+                            f"{J.KRAKEN_DAMAGE['hull']} HULL   -1 CREW")
 
         if self.cyclone:
             (sx, sy), _ = self.ship_position()
@@ -362,7 +385,100 @@ class Odyssey(ShowBase):
             if self.cyclone.hits(sx, sy):
                 self.get_lost()
                 return
+        self.tell_story()
         self.check_game_over()
+
+    # --- the 2D game's features: Chronos at the helm, story beats -----------
+
+    def toggle_helm(self):
+        if self.state != "sail":
+            return
+        if self.helm:
+            self.helm = None
+            self.draw_helm_thread()
+            self.show_flash("YOU TAKE THE HELM", L.GOLD)
+        else:
+            self.engage_helm(self.helm_strategy)
+
+    def engage_helm(self, strategy):
+        self.helm_strategy = strategy
+        if not self.started:
+            self.started = True
+        if self.move_to:                              # finish this cell first
+            cell, step = self.move_to, math.ceil(self.move_start + 1 - 1e-9)
+        else:
+            cell, step = self.cell, math.ceil(self.sim - 1e-9)
+        path = J.helm_route(self.leg, cell, step, strategy)
+        if not path:
+            self.show_flash("CHRONOS FINDS NO SAFE COURSE FROM HERE")
+            return
+        self.helm = {"strategy": strategy, "path": path}
+        self.paused = False
+        self.draw_helm_thread()
+        self.show_flash(f"CHRONOS TAKES THE HELM   ·   {strategy.upper()}",
+                        L.GOLD)
+
+    def helm_command(self, t):
+        """The arrow Chronos is pressing now, and when that move began."""
+        path = self.helm["path"]
+        for (x0, y0, t0), (x1, y1, t1) in zip(path, path[1:]):
+            if t0 <= t + 1e-9 < t1:
+                if (x0, y0) != self.cell:             # knocked off course
+                    return None, None
+                for name, move in ARROW_MOVES.items():
+                    if move == (x1 - x0, y1 - y0):
+                        return name, float(t0)
+                return None, None                     # Chronos waits
+        return None, None
+
+    def draw_helm_thread(self):
+        if getattr(self, "helm_line", None):
+            self.helm_line.removeNode()
+            self.helm_line = None
+        if not self.helm:
+            return
+        pts = [self.w(x, y, 0.25) for x, y, _ in self.helm["path"]]
+        self.helm_line = L.lines("helm-thread",
+                                 HELM_COLOR[self.helm["strategy"]], 3, [pts])
+        self.helm_line.reparentTo(self.leg_root)
+        self.helm_line.setFogOff()
+
+    def tell_story(self):
+        """The 2D game's narrative beats, as subtitles."""
+        status = "SAILING" if self.move_to else "WAITING"
+        nearest, active = None, False
+        cell = self.current_cell()
+        for hazard in self.leg.hazards:
+            d = math.hypot(cell[0] - hazard["position"][0],
+                           cell[1] - hazard["position"][1]) - hazard["radius"]
+            if nearest is None or d < nearest:
+                nearest = d
+                active = J.hazard_rise(hazard, self.sim) > 0
+        event = self.story.update(status, nearest, active)
+        if event:
+            self.beat, self.beat_until = event.text, self.anim_time + 4.0
+
+    def on_number(self, k):
+        if self.state == "card":
+            self.choose(k)
+        elif self.state == "sail" and self.helm:
+            self.engage_helm(J.HELM_STRATEGIES[k])
+
+    def repair(self):
+        if self.state == "sail":
+            msg = self.journey.repair()
+            ok = msg.startswith("Hull repaired")
+            self.show_flash(msg.upper(), L.GOLD if ok else L.DANGER)
+            if ok:
+                self.sound.play("chime", 0.6)
+
+    def heal(self):
+        if self.state == "sail":
+            msg = self.journey.heal()
+            ok = msg.startswith("Medicine taken")
+            self.show_flash(msg.upper(), L.GOLD if ok else L.DANGER)
+            if ok:
+                self.sound.play("chime", 0.6)
 
     def current_cell(self):
         if self.move_to and self.sim - self.move_start >= 0.5:
@@ -410,8 +526,9 @@ class Odyssey(ShowBase):
                     self.sound.play("roar", 0.35)
                 self.kraken_up[k] = up
 
-    def show_flash(self, text):
+    def show_flash(self, text, color=None):
         self.flash, self.flash_until = text, self.anim_time + 2.2
+        self.flash_color = color or L.DANGER
 
     def check_game_over(self):
         reason = self.journey.game_over()
@@ -424,6 +541,8 @@ class Odyssey(ShowBase):
 
     def get_lost(self):
         self.state = "lost"
+        self.helm = None
+        self.draw_helm_thread()
         self.cell = J.safe_landing(self.rng, self.leg,
                                    (self.cyclone.x, self.cyclone.y))
         self.move_to = None
@@ -515,14 +634,21 @@ class Odyssey(ShowBase):
         card = island.card
         self.state, self.card_phase = "card", "choose"
         self.card_title.setText(island.name)
-        self.card_sub.setText(
-            f"{island.episode['book']}   ·   " +
-            ("A SAFE LANDING" if island.correct else "THE WRONG SHORE"))
+        self.helm = None
+        self.draw_helm_thread()
+        if island.correct:
+            where = "A SAFE LANDING"
+        elif island.encounter is not None:
+            where = "A DISTANT SHORE"
+        else:
+            where = "THE WRONG SHORE"
+        self.card_sub.setText(f"{island.episode['book']}   ·   {where}")
         self.card_sub.setFg(L.GOLD if island.correct else L.DANGER)
         self.card_body.setText(card["story"])
-        self.card_choices.setText(
-            "\n".join(f"{k + 1}    {c['text']}"
-                      for k, c in enumerate(card["choices"])))
+        self.card_choices.setText("\n".join(
+            f"{k + 1}    {c['text']}" +
+            (f"  ({c['detail']})" if c.get("detail") else "")
+            for k, c in enumerate(card["choices"])))
         self.card_result.setText("")
         self.card_effects.setText("")
         self.card_footer.setText("PRESS 1 OR 2 TO CHOOSE")
@@ -531,12 +657,23 @@ class Odyssey(ShowBase):
     def choose(self, k):
         if self.state != "card" or self.card_phase != "choose":
             return
+        if k > 1:
+            return
         text, effects = self.journey.resolve(self.island, k)
+        if effects is None:                       # can't afford that choice
+            self.card_effects.setText(text.upper())
+            self.sound.play("chime_low", 0.6)
+            return
         self.sound.play("chime", 0.6)
+        found = self.journey.loot()
         self.card_phase = "result"
         self.card_choices.setText("")
         self.card_result.setText(text)
-        self.card_effects.setText(effects_text(effects))
+        line = effects_text(effects)
+        if found:
+            line += "\nASHORE YOU FIND   " + "   ".join(
+                f"+{v} {k.upper()}" for k, v in found.items())
+        self.card_effects.setText(line)
         self.card_footer.setText("PRESS SPACE TO SET SAIL")
         reason = self.journey.game_over()
         if reason:
@@ -551,7 +688,8 @@ class Odyssey(ShowBase):
         self.card_title.setText("YOU HAVE REACHED ITHACA")
         self.card_sub.setText(f"{I.ITHACA['book']}   ·   HOME")
         self.card_sub.setFg(L.GOLD)
-        self.card_body.setText(I.ITHACA["story"])
+        self.card_body.setText(self.story.update("ARRIVED").text + "  " +
+                               I.ITHACA["story"])
         self.card_choices.setText("")
         self.card_result.setText(
             f"You came home with {r['crew']} of 12 crew and "
@@ -717,9 +855,15 @@ class Odyssey(ShowBase):
         tl, tr, bl = self.a2dTopLeft, self.a2dTopRight, self.a2dBottomLeft
         self.hud_leg = self.text(tl, "", (0.07, -0.09), 0.04, L.CREAM,
                                  self.mono, TextNode.ALeft)
-        self.hud_res = [self.text(tr, "", (-0.07 - 0.33 * (3 - i), -0.09),
-                                  0.04, L.CREAM, self.mono, TextNode.ARight)
-                        for i in range(4)]
+        self.hud_res = [self.text(tr, "", (-0.07 - 0.33 * (3 - i % 4),
+                                           -0.09 - 0.06 * (i // 4)),
+                                  0.04 if i < 4 else 0.034, L.CREAM,
+                                  self.mono, TextNode.ARight)
+                        for i in range(8)]
+        self.hud_helm = self.text(tl, "", (0.07, -0.15), 0.032, L.MUTED,
+                                  self.mono, TextNode.ALeft)
+        self.hud_beat = self.text(root, "", (0, -0.72), 0.046, L.CREAM,
+                                  self.italic, shadow=True)
         self.hud_omen = self.text(root, "", (0, 0.8), 0.045, L.CREAM,
                                   self.italic, wrap=34, shadow=True)
         self.hud_prompt = self.text(root, "", (0, -0.55), 0.045, L.GOLD,
@@ -727,10 +871,11 @@ class Odyssey(ShowBase):
         self.hud_flash = self.text(root, "", (0, 0.45), 0.055, L.DANGER,
                                    self.serif, shadow=True)
         self.hud_controls = self.text(
-            bl, "ARROWS  SAIL     SPACE  PAUSE     R  RESTART     N  NEW "
-                "VOYAGE", (0.07, 0.06), 0.032, L.MUTED, self.mono,
-            TextNode.ALeft)
-        self.hud_parts = [root, self.hud_leg, self.hud_controls] + self.hud_res
+            bl, "ARROWS SAIL   H CHRONOS HELM   E REPAIR   M HEAL   "
+                "SPACE PAUSE   R RESTART   N NEW VOYAGE", (0.07, 0.06), 0.03,
+            L.MUTED, self.mono, TextNode.ALeft)
+        self.hud_parts = ([root, self.hud_leg, self.hud_controls,
+                           self.hud_helm] + self.hud_res)
 
     def draw_hud(self):
         visible = self.state != "title"
@@ -743,11 +888,22 @@ class Odyssey(ShowBase):
             return
         j, r = self.journey, self.journey.resources
         self.hud_leg.setText(f"LEG {j.leg_index + 1} OF {j.total_legs}")
-        values = {"food": math.ceil(r["food"]), "health": r["health"],
-                  "crew": r["crew"], "favor": r["favor"]}
-        for node, key in zip(self.hud_res, ("food", "health", "crew", "favor")):
-            node.setText(f"{key.upper()} {values[key]}")
-            node.setFg(L.DANGER if values[key] <= LOW[key] else L.CREAM)
+        keys = ("food", "health", "crew", "favor",
+                "hull", "wood", "rope", "medicine")
+        for node, key in zip(self.hud_res, keys):
+            value = math.ceil(r[key])
+            node.setText(f"{key.upper()} {value}")
+            node.setFg(L.DANGER if value <= LOW[key] else
+                       (L.CREAM if key in ("food", "health", "crew", "favor")
+                        else L.MUTED))
+        if self.helm:
+            self.hud_helm.setText(
+                f"HELM  CHRONOS · {self.helm['strategy'].upper()}   "
+                "1 SURVIVAL  2 BALANCED  3 SPEED")
+        else:
+            self.hud_helm.setText("HELM  YOU")
+        self.hud_beat.setText(self.beat if self.anim_time < self.beat_until
+                              and self.state in ("sail", "lost") else "")
 
         self.hud_omen.setText(self.omen_text()
                               if self.state in ("sail", "lost") else "")
@@ -758,7 +914,9 @@ class Odyssey(ShowBase):
         else:
             self.hud_prompt.setText("")
         self.hud_flash.setText(self.flash if self.anim_time < self.flash_until
+                               and self.state in ("sail", "lost", "depart")
                                else "")
+        self.hud_flash.setFg(self.flash_color)
 
     def omen_text(self):
         if self.omen == "final":

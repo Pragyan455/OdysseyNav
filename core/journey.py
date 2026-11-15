@@ -15,6 +15,9 @@ from collections import deque
 
 from core import islands
 from core.chronos import ChronosPlanner
+from core.encounters import ENCOUNTERS, EncounterEngine      # teammate's
+from core.strategy import StrategyPlanner                    # teammate's
+from core.survival import ShipSurvival                       # teammate's
 
 # --- the sea of one leg ---------------------------------------------------------
 WIDTH, LENGTH = 23, 40            # grid cells
@@ -24,14 +27,33 @@ HARBOR_REACH = 1.3                # cells past the shore that count as landing
 MAX_PLAN_STEPS = 200
 
 # --- resources -----------------------------------------------------------------
-START_RESOURCES = {"food": 30.0, "health": 10, "crew": 12, "favor": 6}
-MAX_RESOURCES = {"food": 40.0, "health": 10, "crew": 12, "favor": 10}
+_SHIP = ShipSurvival()             # hull numbers from the 2D game's rules
+START_RESOURCES = {"food": 30.0, "health": 10, "crew": 12, "favor": 6,
+                   "hull": _SHIP.max_hull, "wood": 1, "rope": 0,
+                   "medicine": 0}
+MAX_RESOURCES = {"food": 40.0, "health": 10, "crew": 12, "favor": 10,
+                 "hull": _SHIP.max_hull, "wood": 9, "rope": 9, "medicine": 5}
 FOOD_PER_SECOND = 0.3             # eaten every second at sea
-KRAKEN_DAMAGE = {"health": -3, "crew": -1}
+KRAKEN_DAMAGE = {"hull": -_SHIP.damage_per_hit, "crew": -1}
+ROUGH_DAMAGE = {"hull": -6}
+REPAIR_COST = {"wood": -2, "rope": -1}       # same as the 2D game's repair
+REPAIR_HULL = _SHIP.repair_amount
+HEAL_COST, HEAL_HEALTH = {"medicine": -1}, 3
+RATION_FOOD = 2.0                 # one 2D-game ration = 2 days of food here
+LOOT = {"wood": (1, 3), "rope": (0, 2), "medicine": (0, 1)}  # per landing
 INVULNERABLE_STEPS = 4            # after a kraken hit
 CLEAR_OMEN_FAVOR = 7              # favor >= this: Athena shows the way
 CYCLONE_FAVOR = 3                 # favor <= this: vague omen, cyclone hunts
-ROUGH_CELLS_PER_DAMAGE = 2        # rough water: -1 health per 2 cells sailed
+ROUGH_CELLS_PER_DAMAGE = 2        # rough water: hull damage every 2 cells
+
+# The 2D game's islands that join the voyage as "other" shores (the rest of
+# its encounters are Odyssey episodes we already have).
+EXTRA_ISLANDS = {
+    4: {"key": "ogygia", "name": "OGYGIA", "book": "BOOK V"},
+    5: {"key": "phaeacia", "name": "PHAEACIA", "book": "BOOK VI"},
+    7: {"key": "calypso", "name": "CALYPSO'S HAVEN", "book": "BOOK VII"},
+}
+EXTRA_CHANCE = 0.45               # how often the other shore is one of these
 
 BASE_STEP_SECONDS = 0.32          # seconds per cell with a full crew
 
@@ -40,6 +62,7 @@ GAME_OVER_TEXT = {
     "health": "Odysseus falls. The voyage ends far from home.",
     "crew": "No one is left to row. The ship drifts forever.",
     "favor": "The gods turn away. Poseidon drags the ship beneath the waves.",
+    "hull": "The hull splits apart. The sea takes the ship.",
 }
 
 
@@ -94,9 +117,11 @@ def hazard_hits(hazards, cell, steps):
 # --- islands and legs ----------------------------------------------------------
 
 class Island:
-    def __init__(self, center, episode, correct, harsh, final=False):
+    def __init__(self, center, episode, correct, harsh, final=False,
+                 encounter=None):
         self.center = center          # (gx, gy), may be fractional
         self.episode = episode        # entry from islands.EPISODES / ITHACA
+        self.encounter = encounter    # 2D-game encounter id, or None
         self.correct = correct
         self.harsh = harsh
         self.final = final
@@ -118,6 +143,11 @@ class Island:
     def card(self):
         if self.final:
             return None
+        if self.encounter is not None:
+            enc = ENCOUNTERS[self.encounter]
+            return {"story": enc.story,
+                    "choices": [{"text": c.label, "detail": c.description}
+                                for c in enc.choices]}
         return self.episode["harsh" if self.harsh else "calm"]
 
 
@@ -158,9 +188,10 @@ def _harbor_target(island, obstacles):
     return min(cells, key=lambda c: (c[1], abs(c[0] - START[0])))
 
 
-def generate_leg(index, seed):
+def generate_leg(index, seed, used_extras=()):
     """Leg `index` (0-based) of the journey with this seed.
-    Legs 0..7 have two islands; leg 8 is Ithaca alone."""
+    Legs 0..7 have two islands; leg 8 is Ithaca alone. used_extras: 2D-game
+    islands already visited this voyage (each appears at most once)."""
     rng = random.Random(seed * 1000 + index)
     final = index >= islands.ROUTE_LEGS
     for _ in range(300):
@@ -171,12 +202,17 @@ def generate_leg(index, seed):
             correct = islands.EPISODES[index]
             wrong = rng.choice([e for e in islands.EPISODES
                                 if e is not correct])
+            extras = [k for k in EXTRA_ISLANDS if k not in used_extras]
+            encounter = None
+            if extras and rng.random() < EXTRA_CHANCE:
+                encounter = rng.choice(extras)
+                wrong = EXTRA_ISLANDS[encounter]
             left = (rng.uniform(4.0, 6.0), rng.uniform(31.0, 34.0))
             right = (rng.uniform(16.0, 18.0), rng.uniform(31.0, 34.0))
             if rng.random() < 0.5:
                 left, right = right, left
             isles = [Island(left, correct, True, False),
-                     Island(right, wrong, False, True)]
+                     Island(right, wrong, False, True, encounter=encounter)]
 
         reefs = []
         while len(reefs) < 6:
@@ -293,6 +329,52 @@ def safe_landing(rng, leg, cyclone_xy, min_dist=8):
     return rng.choice(options) if options else START
 
 
+# --- Chronos takes the helm ---------------------------------------------------
+
+HELM_STRATEGIES = ("survival", "balanced", "speed")   # the 2D game's fates
+
+
+def helm_route(leg, cell, start_step, strategy="balanced"):
+    """Plan from the ship's cell at a whole step to the true island's harbor
+    with the 2D game's strategy planner. If the cell is under a kraken at
+    that step, try the next few steps (the ship holds position meanwhile)."""
+    correct = next(k for k, i in enumerate(leg.islands) if i.correct)
+    target = leg.routes[correct][-1][:2]
+    planner = StrategyPlanner(WIDTH, LENGTH, leg.obstacles)
+    for wait in range(4):
+        path = planner.plan_strategy(cell, target, hazards=leg.hazards,
+                                     strategy=strategy,
+                                     start_time=start_step + wait,
+                                     max_time=start_step + wait +
+                                     MAX_PLAN_STEPS)
+        if path:
+            return path
+    return None
+
+
+class _EncounterInventory:
+    """The 2D game's encounter rules read and change these fields."""
+
+    def __init__(self, resources):
+        self.food = resources["food"] / RATION_FOOD
+        self.wood = resources["wood"]
+        self.rope = resources["rope"]
+        self.medicine = resources["medicine"]
+        self.morale = resources["favor"] * 10
+        self.crew = resources["crew"]
+        self.failed = False
+
+
+class _EncounterShip:
+    def __init__(self, hull):
+        self.hull = hull
+        self.max_hull = MAX_RESOURCES["hull"]
+
+    @property
+    def sunk(self):
+        return self.hull <= 0
+
+
 # --- the journey ---------------------------------------------------------------
 
 class Journey:
@@ -302,13 +384,19 @@ class Journey:
         self.resources = dict(START_RESOURCES)
         self.leg_index = 0
         self.history = []             # (leg, island name, correct)
+        self.encounters = EncounterEngine()     # the 2D game's encounters
+        self.used_extras = set()
 
     @property
     def total_legs(self):
         return islands.ROUTE_LEGS + 1
 
     def leg(self):
-        return generate_leg(self.leg_index, self.seed)
+        leg = generate_leg(self.leg_index, self.seed, self.used_extras)
+        for island in leg.islands:
+            if island.encounter is not None:
+                self.used_extras.add(island.encounter)
+        return leg
 
     def apply(self, effects):
         for key, delta in effects.items():
@@ -320,13 +408,16 @@ class Journey:
 
     def game_over(self):
         """The reason the voyage ended, or None."""
-        for key in ("food", "health", "crew", "favor"):
+        for key in ("food", "health", "crew", "favor", "hull"):
             if self.resources[key] <= 0:
                 return key
         return None
 
     def resolve(self, island, choice_index):
-        """Play a choice on an island card. Returns (result text, effects)."""
+        """Play a choice on an island card. Returns (result text, effects),
+        or (reason, None) if a 2D-game choice can't be afforded."""
+        if island.encounter is not None:
+            return self._resolve_encounter(island, choice_index)
         choice = island.card["choices"][choice_index]
         if "chance" in choice:
             won = self.rng.random() < choice["chance"]
@@ -337,6 +428,52 @@ class Journey:
         self.apply(effects)
         self.history.append((self.leg_index, island.name, island.correct))
         return text, effects
+
+    def _resolve_encounter(self, island, choice_index):
+        before = dict(self.resources)
+        inv = _EncounterInventory(self.resources)
+        ship = _EncounterShip(self.resources["hull"])
+        ok, text = self.encounters.resolve(island.encounter, choice_index,
+                                           inv, ship)
+        if not ok:
+            return text, None
+        effects = {
+            "food": inv.food * RATION_FOOD - before["food"],
+            "wood": inv.wood - before["wood"],
+            "rope": inv.rope - before["rope"],
+            "medicine": inv.medicine - before["medicine"],
+            "favor": round(inv.morale / 10) - before["favor"],
+            "hull": ship.hull - before["hull"],
+        }
+        effects = {k: v for k, v in effects.items() if abs(v) > 1e-9}
+        self.apply(effects)
+        self.history.append((self.leg_index, island.name, island.correct))
+        return text, effects
+
+    def loot(self):
+        """What the crew finds ashore on every landing."""
+        found = {k: self.rng.randint(lo, hi) for k, (lo, hi) in LOOT.items()}
+        found = {k: v for k, v in found.items() if v}
+        self.apply(found)
+        return found
+
+    def repair(self):
+        r = self.resources
+        if r["wood"] < 2 or r["rope"] < 1:
+            return "Repairs need 2 wood and 1 rope. Land on islands to find them."
+        if r["hull"] >= MAX_RESOURCES["hull"]:
+            return "The hull is already sound."
+        self.apply(REPAIR_COST | {"hull": REPAIR_HULL})
+        return f"Hull repaired to {r['hull']}   -2 WOOD   -1 ROPE"
+
+    def heal(self):
+        r = self.resources
+        if r["medicine"] < 1:
+            return "No medicine left. Some islands have healing herbs."
+        if r["health"] >= MAX_RESOURCES["health"]:
+            return "Odysseus is already in good health."
+        self.apply(HEAL_COST | {"health": HEAL_HEALTH})
+        return f"Medicine taken   +{HEAL_HEALTH} HEALTH   -1 MEDICINE"
 
     def next_leg(self):
         self.leg_index += 1
