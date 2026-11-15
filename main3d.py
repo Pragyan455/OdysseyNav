@@ -126,6 +126,9 @@ class Odyssey(ShowBase):
     # =========================================================================
 
     def new_journey(self):
+        if getattr(self, "old_root", None):
+            self.old_root.removeNode()
+        self.old_root = None
         self.journey = J.Journey(self.seed)
         self.offset = Vec3(0, 0, 0)
         self.behind_root.getChildren().detach()
@@ -155,11 +158,33 @@ class Odyssey(ShowBase):
             self.new_journey()
 
     def start_leg(self):
+        """A fresh voyage (or restart): build the sea, then begin sailing."""
+        self.load_leg()
+        self.begin_sailing()
+
+    def load_leg(self):
+        """Build the current leg's sea: islands, reefs, krakens, whirlpools.
+        On a departure this runs as soon as you set sail, so the next islands
+        are already out there in the mist while you round the last one."""
         j = self.journey
         self.leg = j.leg()
         self.rng = random.Random(self.seed * 7919 + j.leg_index)
         self.omen = ("final" if self.leg.final
                      else J.omen_level(j.resources["favor"], j.leg_index))
+        self.cyclone = None
+        if self.omen == "vague":
+            self.cyclone = Cyclone(*J.cyclone_spawn(self.rng, J.START))
+        self.rough = ([] if self.leg.final else
+                      J.rough_water(self.leg, j.resources["favor"], self.rng,
+                                    j.leg_index))
+        self.block_island_behind()
+        self.build_leg()
+        self.kraken_up = [False] * len(self.krakens)
+
+    def begin_sailing(self):
+        """Sailing state for the current leg. Only the very first leg waits
+        for you to set sail; after that the voyage simply carries on."""
+        j = self.journey
         # sailing state; time on a leg is counted in planner steps
         self.sim = 0.0
         self.cell = J.START
@@ -167,24 +192,15 @@ class Odyssey(ShowBase):
         self.move_start = 0.0
         self.heading = 90.0
         self.turn_from = 90.0
-        self.started = False
+        self.started = j.leg_index > 0
         self.paused = False
         self.invulnerable_until = -1.0
         self.flash, self.flash_until, self.flash_color = "", 0.0, L.DANGER
         self.puzzle = None
         self.chart_root.hide()
-        self.cyclone = None
-        if self.omen == "vague":
-            self.cyclone = Cyclone(*J.cyclone_spawn(self.rng, J.START))
-        self.rough = ([] if self.leg.final else
-                      J.rough_water(self.leg, j.resources["favor"], self.rng,
-                                    j.leg_index))
         self.rough_cells = 0
-        self.block_island_behind()
-        self.build_leg()
         if self.rough and self.state != "title":
             self.show_flash("THE SEA GROWS ROUGH AS THE GODS TURN AWAY")
-        self.kraken_up = [False] * len(self.krakens)
         self.helm = None
         self.helm_strategy = getattr(self, "helm_strategy", "balanced")
         self.draw_helm_thread()
@@ -631,6 +647,18 @@ class Odyssey(ShowBase):
         self.behind_cells = ((c.x, c.y), radius + 0.3 * CELL)
         self.card_root.hide()
         self.state = "depart"
+        # the rest of this sea fades into the mist behind you...
+        if getattr(self, "old_root", None):
+            self.old_root.removeNode()
+        self.old_root = self.leg_root
+        self.old_root.setTransparency(TransparencyAttrib.MAlpha)
+        self.leg_root = self.render.attachNewNode("leg")
+        self.helm_line = None
+        # ...and the next islands are already waiting ahead
+        self.offset = self.depart_path[-1] - to_world(*J.START)
+        self.journey.next_leg()
+        self.load_leg()
+        self.sim, self.move_to = 0.0, None        # the new sea's clock
 
     def pose_along(self, f):
         """Position and heading at fraction f (0..1) of the departure path."""
@@ -654,11 +682,13 @@ class Odyssey(ShowBase):
         self.depart_pose = (pos, heading + turn * min(1.0, dt * 4))
         if self.check_game_over():
             return
+        if self.old_root:
+            self.old_root.setAlphaScale(1.0 - f)
         if f >= 1.0:
-            self.offset = self.depart_path[-1] - to_world(*J.START)
-            self.journey.next_leg()
+            self.old_root.removeNode()
+            self.old_root = None
             self.state = "sail"
-            self.start_leg()
+            self.begin_sailing()
 
     # --- landing -------------------------------------------------------------
 
