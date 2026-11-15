@@ -6,6 +6,7 @@ from core.navigator import Navigator
 from core.narrative import NarrativeEngine
 from core.timeline import VoyageTimeline
 from core.comparison import compare_strategies
+from core.oracle import analyze_strategies
 
 pygame.init()
 
@@ -77,7 +78,7 @@ def build_world():
     global obstacles, planner, hazards, path, navigator
     global ship, ithaca, simulation_time, paused, route_exposure, route_duration
     global narrative, timeline, replay_mode, replay_time
-    global comparison_results, comparison_mode
+    global comparison_results, comparison_mode, oracle_verdict, oracle_mode
 
     obstacles = create_obstacles()
     planner = StrategyPlanner(GRID_WIDTH, GRID_HEIGHT, obstacles)
@@ -102,6 +103,7 @@ def build_world():
     comparison_results = compare_strategies(
         planner, START, GOAL, hazards=hazards, start_time=0, max_time=150
     )
+    oracle_verdict = analyze_strategies(comparison_results)
     path = list(comparison_results[STRATEGY].path) or None
     route_duration = path[-1][2] - path[0][2] if path else None
     route_exposure = (
@@ -118,6 +120,7 @@ def build_world():
     replay_mode = False
     replay_time = 0.0
     comparison_mode = False
+    oracle_mode = False
 
     if path:
         waits = sum(a[:2] == b[:2] for a, b in zip(path, path[1:]))
@@ -257,6 +260,44 @@ def draw_comparison_panel():
               font_small, MUTED, (panel.x + 22, panel.bottom - 25))
 
 
+
+def draw_oracle_panel():
+    """Show evidence-based mission conclusions from the same route comparison."""
+    panel = pygame.Rect(235, 282, 730, 340)
+    pygame.draw.rect(screen, PANEL, panel, border_radius=8)
+    pygame.draw.rect(screen, GOLD, panel, 1, border_radius=8)
+    draw_text("THE ORACLE'S VERDICT  |  V: CLOSE", font_normal, GOLD,
+              (panel.x + 24, panel.y + 16))
+    draw_text("STRATEGY       TRAVEL       WAITS       EXPOSURE", font_small,
+              MUTED, (panel.x + 24, panel.y + 57))
+    for index, strategy in enumerate(("survival", "balanced", "speed")):
+        result = comparison_results[strategy]
+        y = panel.y + 86 + index * 34
+        if result.reachable:
+            stats = (f"{result.travel_time:>5.0f}s"
+                     f"          {result.waiting_steps:>3}"
+                     f"          {result.storm_exposure:>7.2f}")
+        else:
+            stats = "NO SAFE ROUTE"
+        draw_text(strategy.upper(), font_small, STRATEGY_COLORS[strategy],
+                  (panel.x + 24, y))
+        draw_text(stats, font_small, WHITE, (panel.x + 185, y))
+
+    def names(values):
+        return ", ".join(name.title() for name in values) if values else "None"
+
+    draw_text("FASTEST: " + names(oracle_verdict.fastest), font_small, GOLD,
+              (panel.x + 24, panel.y + 202))
+    draw_text("LOWEST EXPOSURE: " + names(oracle_verdict.safest), font_small,
+              SAFE, (panel.x + 24, panel.y + 226))
+    draw_text("NONDOMINATED: " + names(oracle_verdict.pareto_optimal),
+              font_small, WHITE, (panel.x + 24, panel.y + 250))
+    draw_text(oracle_verdict.summary, font_small, WHITE,
+              (panel.x + 24, panel.y + 282))
+    draw_text("Exposure is a relative score, not a probability.", font_small,
+              MUTED, (panel.x + 24, panel.y + 308))
+
+
 def draw_ship(t):
     x, y = ship.x, ship.y + math.sin(t * 2) * 3
     pygame.draw.polygon(screen, GOLD, [
@@ -374,7 +415,7 @@ def draw_interface():
     draw_text(f"{label}: {countdown:.1f}s", font_small,
               DANGER if storm_active(replay_time if replay_mode else simulation_time) else SAFE,
               (590, HEIGHT - 42))
-    draw_text("T: REPLAY  C: COMPARE", font_small, GOLD, (985, HEIGHT - 42))
+    draw_text("T: REPLAY  C: COMPARE  V: ORACLE", font_small, GOLD, (925, HEIGHT - 42))
 
 running = True
 
@@ -384,8 +425,14 @@ while running:
         if event.type == pygame.QUIT:
             running = False
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_c:
+            if event.key == pygame.K_v:
+                oracle_mode = not oracle_mode
+                if oracle_mode:
+                    comparison_mode = False
+            elif event.key == pygame.K_c:
                 comparison_mode = not comparison_mode
+                if comparison_mode:
+                    oracle_mode = False
             elif event.key == pygame.K_t and path:
                 if not replay_mode:
                     replay_mode = True
@@ -461,6 +508,8 @@ while running:
     draw_interface()
     if comparison_mode:
         draw_comparison_panel()
+    if oracle_mode:
+        draw_oracle_panel()
     pygame.display.flip()
 
 pygame.quit()
